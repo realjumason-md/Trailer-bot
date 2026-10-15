@@ -6,6 +6,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { logger } from "./logger";
 import {
+  downloadRemoteVideo,
+  RemoteVideoDownloadError,
+} from "./remote-video-download";
+import {
   compressVideo,
   parseCustomResolution,
   VideoProcessingError,
@@ -99,11 +103,13 @@ type PendingVideo = {
 type PreparingVideo = {
   key: string;
   chatId: number;
+  source: "upload" | "url";
   fileSize?: number;
   durationSeconds?: number;
   statusMessageId?: number;
   startedAt: number;
   cancelled: boolean;
+  abortController?: AbortController;
 };
 
 type ActiveJob = {
@@ -112,14 +118,17 @@ type ActiveJob = {
   cancelled: boolean;
   child: ChildProcess | null;
   resolution: string;
+  sourceBytes: number;
   statusText: string;
   attempt: number;
   progressPercent: number;
-  etaSeconds: number | null;
+  etaDeadlineAt: number | null;
   attemptStartedAt: number;
 };
 
-const LOCAL_API_PORT = Number(process.env["TELEGRAM_LOCAL_API_PORT"] ?? "18081");
+const LOCAL_API_PORT = Number(
+  process.env["TELEGRAM_LOCAL_API_PORT"] ?? "18081",
+);
 const LOCAL_API_ROOT = `http://127.0.0.1:${LOCAL_API_PORT}`;
 const BOT_DATA_DIR = path.resolve(
   process.env["BOT_DATA_DIR"] ?? path.join(tmpdir(), "telegram-video-bot"),
@@ -226,7 +235,10 @@ async function editMessage(
   });
 }
 
-async function answerCallback(callbackId: string, text?: string): Promise<void> {
+async function answerCallback(
+  callbackId: string,
+  text?: string,
+): Promise<void> {
   await telegramCall("answerCallbackQuery", {
     callback_query_id: callbackId,
     ...(text ? { text } : {}),
@@ -298,6 +310,7 @@ async function prepareVideo(
   const preparation: PreparingVideo = {
     key,
     chatId: message.chat.id,
+    source: "upload",
     fileSize: file.file_size,
     durationSeconds: file.duration,
     startedAt: Date.now(),
@@ -408,6 +421,155 @@ async function prepareVideo(
   }
 }
 
+async function prepareVideoFromUrl(
+  message: TelegramMessage,
+  url: string,
+): Promise<void> {
+  const userId = message.from?.id;
+  if (userId == null) return;
+  const key = makeSessionKey(message.chat.id, userId);
+
+  if (activeJob) {
+    await sendMessage(
+      message.chat.id,
+      "A video is being compressed right now. Please try again when it is finished.",
+    );
+    return;
+  }
+  if (pendingVideos.has(key)) {
+    await sendMessage(
+      message.chat.id,
+      "You already have a video waiting for a resolution. Choose one below or send /cancel first.",
+    );
+    return;
+  }
+  if (preparingVideos.size >= MAX_PREPARING_UPLOADS) {
+    await sendMessage(
+      message.chat.id,
+      "Another video is being prepared. Please wait for it to finish before sending another link.",
+    );
+    return;
+  }
+
+  const inputPath = path.join(JOBS_DIR, `${randomUUID()}.download`);
+  const abortController = new AbortController();
+  const preparation: PreparingVideo = {
+    key,
+    chatId: message.chat.id,
+    source: "url",
+    startedAt: Date.now(),
+    cancelled: false,
+    abortController,
+  };
+  preparingVideos.set(key, preparation);
+  let fileTransferredToPending = false;
+
+  try {
+    const status = await sendMessage(
+      message.chat.id,
+      "Downloading the direct video link (maximum 4 GB). You’ll choose an output resolution when the file is ready.",
+    );
+    preparation.statusMessageId = status.message_id;
+
+    let lastProgressAt = Date.now();
+    let lastProgressPercent = -10;
+    const downloadedBytes = await downloadRemoteVideo(url, inputPath, {
+      maxBytes: videoLimits.maxInputBytes,
+      signal: abortController.signal,
+      onProgress: (progress) => {
+        preparation.fileSize = progress.downloadedBytes;
+        const now = Date.now();
+        const percent =
+          progress.totalBytes && progress.totalBytes > 0
+            ? Math.floor((progress.downloadedBytes / progress.totalBytes) * 100)
+            : null;
+        if (
+          now - lastProgressAt >= 15_000 ||
+          (percent != null && percent >= lastProgressPercent + 10)
+        ) {
+          lastProgressAt = now;
+          if (percent != null) lastProgressPercent = percent;
+          const progressLabel =
+            percent == null
+              ? formatBytes(progress.downloadedBytes)
+              : `${percent}%`;
+          void editMessage(
+            message.chat.id,
+            status.message_id,
+            `Downloading video: ${progressLabel} (${formatBytes(progress.downloadedBytes)}). Send /cancel to stop.`,
+          ).catch(() => undefined);
+        }
+      },
+    });
+
+    if (preparation.cancelled) {
+      await unlink(inputPath).catch(() => undefined);
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        "Video download cancelled.",
+      ).catch(() => undefined);
+      return;
+    }
+    const localFile = await stat(inputPath).catch(() => null);
+    if (!localFile?.isFile() || localFile.size !== downloadedBytes) {
+      throw new RemoteVideoDownloadError(
+        "The video download did not finish correctly. Please try the link again.",
+      );
+    }
+    if (localFile.size > videoLimits.maxInputBytes) {
+      throw new RemoteVideoDownloadError("This bot accepts videos up to 4 GB.");
+    }
+
+    preparation.fileSize = localFile.size;
+    const parsedUrl = new URL(url);
+    const fileName = path.basename(parsedUrl.pathname) || "linked-video";
+    await editMessage(
+      message.chat.id,
+      status.message_id,
+      `Video ready (original size: ${formatBytes(localFile.size)}). Choose an output resolution. I’ll show the encoding countdown once compression begins.`,
+      resolutionKeyboard(),
+    );
+    pendingVideos.set(key, {
+      key,
+      chatId: message.chat.id,
+      fileSize: localFile.size,
+      fileName,
+      filePath: inputPath,
+      statusMessageId: status.message_id,
+      expiresAt: Date.now() + PENDING_TTL_MS,
+    });
+    fileTransferredToPending = true;
+  } catch (error) {
+    const cancelled = preparation.cancelled || abortController.signal.aborted;
+    const userMessage = cancelled
+      ? "Video download cancelled."
+      : error instanceof RemoteVideoDownloadError
+        ? error.message
+        : "I couldn’t download that video link. Check it and try again.";
+    if (preparation.statusMessageId != null) {
+      await editMessage(
+        message.chat.id,
+        preparation.statusMessageId,
+        userMessage,
+      ).catch(() => undefined);
+    } else {
+      await sendMessage(message.chat.id, userMessage).catch(() => undefined);
+    }
+    if (!cancelled) {
+      logger.warn(
+        { code: error instanceof Error ? error.name : "unknown_error" },
+        "Could not download a linked video",
+      );
+    }
+  } finally {
+    preparingVideos.delete(key);
+    if (!fileTransferredToPending) {
+      await unlink(inputPath).catch(() => undefined);
+    }
+  }
+}
+
 function formatBytes(bytes: number): string {
   const gigabytes = bytes / 1_000_000_000;
   if (gigabytes >= 1) return `${gigabytes.toFixed(2)} GB`;
@@ -424,27 +586,33 @@ function formatDuration(seconds: number): string {
   return `${remainder}s`;
 }
 
-function formatRemaining(seconds: number): string {
-  const totalMinutes = Math.max(1, Math.ceil(seconds / 60));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours > 0) return `about ${hours}h ${minutes}m`;
-  return `about ${minutes}m`;
+function formatCountdown(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(seconds));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const remainder = totalSeconds % 60;
+  return [hours, minutes, remainder]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
 }
 
 function describeCompressionStatus(job: ActiveJob): string {
   const percent = `${job.progressPercent}%`;
   const eta =
-    job.etaSeconds == null
-      ? "Measuring speed from this video; the time estimate will appear shortly."
-      : `Estimated ${formatRemaining(job.etaSeconds)} left in this pass.`;
-  return `Compressing to ${job.resolution} · pass ${job.attempt}/4 · ${percent}. ${eta} An extra pass may be needed to meet Telegram’s size limit.`;
+    job.etaDeadlineAt == null
+      ? "Measuring encoding speed; the countdown will appear shortly."
+      : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/4 · ${percent}. ${eta} An extra pass may be needed to meet Telegram’s size limit.`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
-  const resolvedRoot = path.resolve(BOT_API_DATA_DIR);
   const resolvedFile = path.resolve(filePath);
-  if (resolvedFile.startsWith(`${resolvedRoot}${path.sep}`)) {
+  const ownedRoots = [BOT_API_DATA_DIR, JOBS_DIR].map((root) =>
+    path.resolve(root),
+  );
+  if (
+    ownedRoots.some((root) => resolvedFile.startsWith(`${root}${path.sep}`))
+  ) {
     await unlink(resolvedFile).catch(() => undefined);
   }
 }
@@ -471,6 +639,10 @@ function isVideoFile(file: TelegramFile | undefined): file is TelegramFile {
   );
 }
 
+function isHttpUrl(text: string): boolean {
+  return /^https?:\/\//i.test(text);
+}
+
 async function handleMessage(message: TelegramMessage): Promise<void> {
   const text = message.text?.trim();
   const userId = message.from?.id;
@@ -479,11 +651,12 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB.",
+        "Send me a video up to 4 GB, or paste a direct public link to a video file.",
+        "Web pages and streaming-platform links are not direct downloads.",
         "Choose a resolution from the buttons, or enter a custom size such as 720p or 1280x720.",
         "",
         "Use /status to check a job and /cancel to stop or clear it.",
-        "The compression-time estimate starts once encoding begins and updates using this video’s actual speed.",
+        "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
       ].join("\n"),
     );
@@ -508,7 +681,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       const preparation = preparingVideos.get(key);
       const details = [
         preparation?.fileSize != null
-          ? formatBytes(preparation.fileSize)
+          ? preparation.source === "url"
+            ? `${formatBytes(preparation.fileSize)} downloaded`
+            : formatBytes(preparation.fileSize)
           : undefined,
         preparation?.durationSeconds != null
           ? formatDuration(preparation.durationSeconds)
@@ -519,7 +694,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         : "";
       await sendMessage(
         message.chat.id,
-        `Your video${details.length ? ` (${details.join(" · ")})` : ""} is still being prepared${elapsed ? `; this has taken ${elapsed}` : ""}. Compression hasn’t started yet. You’ll get a resolution choice when the file is ready.`,
+        `Your ${preparation?.source === "url" ? "linked " : ""}video${details.length ? ` (${details.join(" · ")})` : ""} is still being prepared${elapsed ? `; this has taken ${elapsed}` : ""}. Compression hasn’t started yet. You’ll get a resolution choice when the file is ready.`,
       );
     } else {
       await sendMessage(message.chat.id, "No video is waiting or processing.");
@@ -544,16 +719,21 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     const preparation = key ? preparingVideos.get(key) : undefined;
     if (preparation) {
       preparation.cancelled = true;
+      preparation.abortController?.abort();
       if (preparation.statusMessageId != null) {
         await editMessage(
           preparation.chatId,
           preparation.statusMessageId,
-          "Cancelling upload preparation. Telegram may take a little while to finish the transfer.",
+          preparation.source === "url"
+            ? "Cancelling the video download..."
+            : "Cancelling upload preparation. Telegram may take a little while to finish the transfer.",
         ).catch(() => undefined);
       }
       await sendMessage(
         message.chat.id,
-        "Upload preparation will be cancelled when Telegram finishes the transfer.",
+        preparation.source === "url"
+          ? "The video download is being cancelled."
+          : "Upload preparation will be cancelled when Telegram finishes the transfer.",
       );
       return;
     }
@@ -563,7 +743,10 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await sendMessage(message.chat.id, "Stopping compression...");
       return;
     }
-    await sendMessage(message.chat.id, "You do not have a waiting video to cancel.");
+    await sendMessage(
+      message.chat.id,
+      "You do not have a waiting video to cancel.",
+    );
     return;
   }
 
@@ -582,6 +765,20 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await beginCompression(pending, resolution);
       return;
     }
+  }
+
+  if (text && isHttpUrl(text)) {
+    void prepareVideoFromUrl(message, text).catch((error: unknown) => {
+      logger.warn(
+        { code: errorName(error), updateType: "video_url" },
+        "Could not prepare a linked video",
+      );
+      void sendMessage(
+        message.chat.id,
+        "I couldn’t prepare that video link. Paste a direct public download link and try again.",
+      ).catch(() => undefined);
+    });
+    return;
   }
 
   const file = message.video
@@ -646,7 +843,11 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
       pending.chatId,
       pending.statusMessageId,
       "Send a target size such as 720p or 1280x720. The video will keep its aspect ratio and will not be enlarged.",
-      { inline_keyboard: [[{ text: "Cancel", callback_data: "resolution:cancel" }]] },
+      {
+        inline_keyboard: [
+          [{ text: "Cancel", callback_data: "resolution:cancel" }],
+        ],
+      },
     );
     return;
   }
@@ -657,7 +858,10 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     return;
   }
 
-  await answerCallback(callback.id, `Starting ${resolution.label} compression.`);
+  await answerCallback(
+    callback.id,
+    `Starting ${resolution.label} compression.`,
+  );
   await beginCompression(pending, resolution);
 }
 
@@ -679,10 +883,11 @@ async function beginCompression(
     cancelled: false,
     child: null,
     resolution: resolution.label,
-    statusText: `Starting ${resolution.label} compression. I’ll estimate the time from this video’s encoding speed.`,
+    sourceBytes: pending.fileSize,
+    statusText: `Starting ${resolution.label} compression. Original size: ${formatBytes(pending.fileSize)}. Measuring encoding speed for the countdown.`,
     attempt: 1,
     progressPercent: 0,
-    etaSeconds: null,
+    etaDeadlineAt: null,
     attemptStartedAt: Date.now(),
   };
   activeJob = job;
@@ -735,8 +940,8 @@ async function runCompressionJob(
         job.attempt = 1;
         job.attemptStartedAt = Date.now();
         job.progressPercent = 0;
-        job.etaSeconds = null;
-        job.statusText = `Compressing ${resolution.label} for a ${formatDuration(info.durationSeconds)} video. Measuring encoding speed; the estimate will appear shortly.`;
+        job.etaDeadlineAt = null;
+        job.statusText = `Original size ${formatBytes(job.sourceBytes)} · compressing ${resolution.label} for a ${formatDuration(info.durationSeconds)} video. Measuring encoding speed; the countdown will appear shortly.`;
         void editMessage(
           pending.chatId,
           pending.statusMessageId,
@@ -754,27 +959,23 @@ async function runCompressionJob(
           job.attempt = progress.attempt;
           job.attemptStartedAt = now;
           job.progressPercent = 0;
-          job.etaSeconds = null;
+          job.etaDeadlineAt = null;
           lastUpdatePercent = -10;
         }
-        job.progressPercent = Math.min(
-          99,
-          Math.floor(progress.fraction * 100),
-        );
+        job.progressPercent = Math.min(99, Math.floor(progress.fraction * 100));
         const attemptElapsedSeconds = (now - job.attemptStartedAt) / 1_000;
         if (progress.fraction >= 0.005 && attemptElapsedSeconds >= 10) {
-          job.etaSeconds = Math.max(
+          const remainingSeconds = Math.max(
             0,
-            Math.round(
-              attemptElapsedSeconds *
-                ((1 - progress.fraction) / progress.fraction),
-            ),
+            attemptElapsedSeconds *
+              ((1 - progress.fraction) / progress.fraction),
           );
+          job.etaDeadlineAt = now + remainingSeconds * 1_000;
         }
         job.statusText = describeCompressionStatus(job);
         if (
           job.progressPercent >= lastUpdatePercent + 10 ||
-          now - lastMessageAt >= 20_000
+          now - lastMessageAt >= 15_000
         ) {
           lastUpdatePercent = job.progressPercent;
           lastMessageAt = now;
@@ -794,7 +995,7 @@ async function runCompressionJob(
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
-      `Compression finished (${result.width}×${result.height}, ${formatBytes(result.outputBytes)}). Sending it to Telegram...`,
+      `Compression finished (${result.width}×${result.height}). Original: ${formatBytes(pending.fileSize)} · compressed: ${formatBytes(result.outputBytes)}. Sending it to Telegram...`,
     ).catch(() => undefined);
 
     await telegramCall(
@@ -802,7 +1003,7 @@ async function runCompressionJob(
       {
         chat_id: pending.chatId,
         video: pathToFileURL(result.outputPath).href,
-        caption: `Compressed to ${result.width}×${result.height} · ${formatBytes(result.outputBytes)}`,
+        caption: `Compressed to ${result.width}×${result.height} · original ${formatBytes(pending.fileSize)} → ${formatBytes(result.outputBytes)}`,
         supports_streaming: true,
       },
       6 * 60 * 60 * 1000,
@@ -811,7 +1012,7 @@ async function runCompressionJob(
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
-      "Done. The compressed video has been sent.",
+      `Done. The compressed video has been sent. Original: ${formatBytes(pending.fileSize)} · outcome: ${formatBytes(result.outputBytes)}.`,
     ).catch(() => undefined);
   } catch (error) {
     const userMessage =
@@ -896,7 +1097,9 @@ async function waitForLocalApi(
   let lastError: unknown;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
-      throw new Error("Telegram's local Bot API server stopped during startup.");
+      throw new Error(
+        "Telegram's local Bot API server stopped during startup.",
+      );
     }
     try {
       return await telegramCall<TelegramUser>("getMe", {}, 10_000);
@@ -1030,7 +1233,10 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     });
 
     logger.info(
-      { username: bot.username ?? "configured bot", localApiPort: LOCAL_API_PORT },
+      {
+        username: bot.username ?? "configured bot",
+        localApiPort: LOCAL_API_PORT,
+      },
       "Telegram video compressor is ready",
     );
     void pollUpdates();

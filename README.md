@@ -45,9 +45,10 @@ The service does not need a public domain to poll Telegram. If you add one, the 
 ## Bot behavior
 
 - Accepts video uploads up to 4 GB.
+- Accepts direct public HTTP/HTTPS download links to video files up to 4 GB. Web pages and streaming-platform or playlist links are not downloaded.
 - After the upload is prepared, asks the user to choose a preset or custom resolution.
-- Shows compression progress and an ETA based on the encoder's measured speed; the estimate updates during compression.
-- Returns an MP4 smaller than Telegram's 1.9 GB delivery limit.
+- Shows the original file size during compression, with progress and a countdown based on the encoder's measured speed.
+- Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit.
 - Processes one compression job at a time.
 
 ## Source layout
