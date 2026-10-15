@@ -22,8 +22,9 @@ RUN git init /src/telegram-bot-api \
 
 RUN cmake -S /src/telegram-bot-api -B /src/telegram-bot-api/build \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
     -DCMAKE_INSTALL_PREFIX=/usr/local \
-  && cmake --build /src/telegram-bot-api/build --target install --parallel 2
+  && cmake --build /src/telegram-bot-api/build --target install --parallel 4
 
 FROM node:24-bookworm-slim AS app-build
 
