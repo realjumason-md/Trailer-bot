@@ -7,9 +7,8 @@ out-tsc
 *.tsbuildinfo
 .expo
 .expo-shared
-/generated-artifacts/
 
-# local secrets and environment files
+# local environment files
 /.env
 /.env.*
 !/.env.example
@@ -53,4 +52,3 @@ Thumbs.db
 # Replit
 .cache/
 .local/
-.env
