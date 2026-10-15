@@ -1,31 +1,7 @@
-FROM node:24-bookworm-slim AS telegram-api-build
+# ---- Stage 1: Get pre-built telegram-bot-api binary ----
+FROM aiogram/telegram-bot-api:latest AS telegram-api
 
-ARG TELEGRAM_BOT_API_COMMIT=e3e9dd8e5b3d7ab8537cd5a10dc31d5ffa8f82d1
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    cmake \
-    g++ \
-    git \
-    gperf \
-    libssl-dev \
-    make \
-    zlib1g-dev \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN git init /src/telegram-bot-api \
-  && git -C /src/telegram-bot-api remote add origin https://github.com/tdlib/telegram-bot-api.git \
-  && git -C /src/telegram-bot-api fetch --depth=1 origin "${TELEGRAM_BOT_API_COMMIT}" \
-  && git -C /src/telegram-bot-api checkout --detach FETCH_HEAD \
-  && git -C /src/telegram-bot-api submodule update --init --recursive --depth 1
-
-RUN cmake -S /src/telegram-bot-api -B /src/telegram-bot-api/build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
-    -DCMAKE_INSTALL_PREFIX=/usr/local \
-  && cmake --build /src/telegram-bot-api/build --target install --parallel 2
-
+# ---- Stage 2: Build the Node.js application ----
 FROM node:24-bookworm-slim AS app-build
 
 RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
@@ -37,6 +13,7 @@ RUN pnpm install --frozen-lockfile \
   && pnpm run typecheck \
   && pnpm --filter @workspace/api-server run build
 
+# ---- Stage 3: Final runtime image ----
 FROM node:24-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
@@ -51,9 +28,8 @@ RUN apt-get update \
     zlib1g \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=telegram-api-build /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
-COPY --from=telegram-api-build /usr/local/lib/ /usr/local/lib/
-RUN ldconfig
+# Copy the already-compiled telegram-bot-api binary
+COPY --from=telegram-api /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
 
 WORKDIR /app
 COPY --from=app-build /app/artifacts/api-server/dist ./artifacts/api-server/dist
