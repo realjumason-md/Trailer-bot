@@ -121,9 +121,12 @@ type ActiveJob = {
 
 const LOCAL_API_PORT = Number(process.env["TELEGRAM_LOCAL_API_PORT"] ?? "18081");
 const LOCAL_API_ROOT = `http://127.0.0.1:${LOCAL_API_PORT}`;
-const BOT_API_DATA_DIR = path.join(tmpdir(), "telegram-video-bot", "api-data");
-const BOT_API_TEMP_DIR = path.join(tmpdir(), "telegram-video-bot", "api-temp");
-const JOBS_DIR = path.join(tmpdir(), "telegram-video-bot", "jobs");
+const BOT_DATA_DIR = path.resolve(
+  process.env["BOT_DATA_DIR"] ?? path.join(tmpdir(), "telegram-video-bot"),
+);
+const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
+const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
+const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const MAX_PREPARING_UPLOADS = 1;
 
