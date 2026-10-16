@@ -1003,6 +1003,9 @@ async function runCompressionJob(
       {
         chat_id: pending.chatId,
         video: pathToFileURL(result.outputPath).href,
+        duration: Math.max(1, Math.round(result.durationSeconds)),
+        width: result.width,
+        height: result.height,
         caption: `Compressed to ${result.width}×${result.height} · original ${formatBytes(pending.fileSize)} → ${formatBytes(result.outputBytes)}`,
         supports_streaming: true,
       },

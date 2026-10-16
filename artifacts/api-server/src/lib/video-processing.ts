@@ -21,6 +21,7 @@ export type CompressionResult = {
   outputPath: string;
   width: number;
   height: number;
+  durationSeconds: number;
   outputBytes: number;
 };
 
@@ -335,10 +336,17 @@ export async function compressVideo(options: {
       );
     }
 
+    // Telegram may not infer metadata from local file:// uploads; probe the finished MP4.
+    const outputInfo = await probeVideo(
+      options.outputPath,
+      (child) => options.onProcess(child),
+    );
+
     return {
       outputPath: options.outputPath,
-      width: dimensions.width,
-      height: dimensions.height,
+      width: outputInfo.width,
+      height: outputInfo.height,
+      durationSeconds: outputInfo.durationSeconds,
       outputBytes,
     };
   } catch (error) {
