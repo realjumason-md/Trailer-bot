@@ -1,14 +1,22 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rmdir, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { FifoQueue } from "./fifo-queue";
 import { logger } from "./logger";
+import { compressedVideoFileName } from "./compressed-video-file-name";
 import {
   downloadRemoteVideo,
   RemoteVideoDownloadError,
 } from "./remote-video-download";
+import {
+  downloadTikTokVideo,
+  findTikTokUrl,
+  TikTokDownloadError,
+  tiktokFailureMessage,
+} from "./tiktok-link-handler";
 import {
   compressVideo,
   parseCustomResolution,
@@ -88,6 +96,7 @@ type TelegramUpdate = {
 };
 
 type PendingVideo = {
+  id: string;
   key: string;
   chatId: number;
   fileSize: number;
@@ -98,12 +107,14 @@ type PendingVideo = {
   durationSeconds?: number;
   sourceWidth?: number;
   sourceHeight?: number;
+  awaitingCustomResolution?: boolean;
 };
 
 type PreparingVideo = {
+  id: string;
   key: string;
   chatId: number;
-  source: "upload" | "url";
+  source: "upload" | "url" | "tiktok";
   fileSize?: number;
   durationSeconds?: number;
   statusMessageId?: number;
@@ -112,7 +123,13 @@ type PreparingVideo = {
   abortController?: AbortController;
 };
 
+type QueueEntry = {
+  pending: PendingVideo;
+  resolution: VideoResolution;
+};
+
 type ActiveJob = {
+  videoId: string;
   key: string;
   chatId: number;
   cancelled: boolean;
@@ -137,7 +154,9 @@ const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
 const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
-const MAX_PREPARING_UPLOADS = 1;
+const MAX_PREPARING_VIDEOS = 2;
+const MAX_OUTSTANDING_VIDEOS = 6;
+const MAX_WAITING_COMPRESSIONS = MAX_OUTSTANDING_VIDEOS - 1;
 
 const PRESET_RESOLUTIONS: VideoResolution[] = [
   { label: "480p", maxWidth: 7680, maxHeight: 480 },
@@ -153,6 +172,7 @@ let localApiProcess: ChildProcess | null = null;
 let activeJob: ActiveJob | null = null;
 const pendingVideos = new Map<string, PendingVideo>();
 const preparingVideos = new Map<string, PreparingVideo>();
+const compressionQueue = new FifoQueue<QueueEntry>(MAX_WAITING_COMPRESSIONS);
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -160,6 +180,7 @@ function wait(milliseconds: number): Promise<void> {
 
 function errorName(error: unknown): string {
   if (error instanceof VideoProcessingError) return error.code;
+  if (error instanceof TikTokDownloadError) return `tiktok_${error.code}`;
   if (error instanceof TelegramApiError) {
     return `telegram_api_${error.apiCode}`;
   }
@@ -272,6 +293,44 @@ function findResolution(value: string): VideoResolution | null {
   );
 }
 
+function pendingForSession(key: string): PendingVideo[] {
+  return [...pendingVideos.values()].filter((pending) => pending.key === key);
+}
+
+function preparationsForSession(key: string): PreparingVideo[] {
+  return [...preparingVideos.values()].filter(
+    (preparation) => preparation.key === key,
+  );
+}
+
+function outstandingVideoCount(): number {
+  const ids = new Set([
+    ...pendingVideos.keys(),
+    ...preparingVideos.keys(),
+    ...compressionQueue.toArray().map((entry) => entry.pending.id),
+  ]);
+  if (activeJob) ids.add(activeJob.videoId);
+  return ids.size;
+}
+
+function canPrepareAnotherVideo(chatId: number): boolean {
+  if (outstandingVideoCount() >= MAX_OUTSTANDING_VIDEOS) {
+    void sendMessage(
+      chatId,
+      "The video queue is full. Please wait for one of the current videos to finish.",
+    ).catch(() => undefined);
+    return false;
+  }
+  if (preparingVideos.size >= MAX_PREPARING_VIDEOS) {
+    void sendMessage(
+      chatId,
+      "Two videos are already being prepared. Please try again shortly.",
+    ).catch(() => undefined);
+    return false;
+  }
+  return true;
+}
+
 async function prepareVideo(
   message: TelegramMessage,
   file: TelegramFile,
@@ -279,35 +338,16 @@ async function prepareVideo(
   const userId = message.from?.id;
   if (userId == null) return;
   const key = makeSessionKey(message.chat.id, userId);
-
-  if (activeJob) {
-    await sendMessage(
-      message.chat.id,
-      "A video is being compressed right now. Please try again when it is finished.",
-    );
-    return;
-  }
-  if (pendingVideos.has(key)) {
-    await sendMessage(
-      message.chat.id,
-      "You already have a video waiting for a resolution. Choose one below or send /cancel first.",
-    );
-    return;
-  }
-  if (preparingVideos.size >= MAX_PREPARING_UPLOADS) {
-    await sendMessage(
-      message.chat.id,
-      "Another upload is being prepared. Please wait for it to finish before sending another video.",
-    );
-    return;
-  }
+  if (!canPrepareAnotherVideo(message.chat.id)) return;
 
   if (file.file_size != null && file.file_size > videoLimits.maxInputBytes) {
     await sendMessage(message.chat.id, "This bot accepts videos up to 4 GB.");
     return;
   }
 
+  const id = randomUUID();
   const preparation: PreparingVideo = {
+    id,
     key,
     chatId: message.chat.id,
     source: "upload",
@@ -316,7 +356,7 @@ async function prepareVideo(
     startedAt: Date.now(),
     cancelled: false,
   };
-  preparingVideos.set(key, preparation);
+  preparingVideos.set(id, preparation);
   try {
     const reportedSize =
       file.file_size == null ? "" : ` (${formatBytes(file.file_size)})`;
@@ -398,90 +438,97 @@ async function prepareVideo(
     }
     preparation.fileSize = localFile.size;
 
-    await editMessage(
-      message.chat.id,
-      status.message_id,
-      `Video ready (${formatBytes(localFile.size)}${file.duration != null ? ` · ${formatDuration(file.duration)}` : ""}). Choose an output resolution. I’ll show an estimated time once encoding begins.`,
-      resolutionKeyboard(),
-    );
-    pendingVideos.set(key, {
+    const pending: PendingVideo = {
+      id,
       key,
       chatId: message.chat.id,
       fileSize: localFile.size,
-      fileName: path.basename(file.file_name ?? "video"),
+      fileName: file.file_name ?? "",
       filePath: fetched.file_path,
       statusMessageId: status.message_id,
       expiresAt: Date.now() + PENDING_TTL_MS,
       durationSeconds: file.duration,
       sourceWidth: file.width,
       sourceHeight: file.height,
+    };
+    pendingVideos.set(id, pending);
+    await editMessage(
+      message.chat.id,
+      status.message_id,
+      `Video ready (${formatBytes(localFile.size)}${file.duration != null ? ` · ${formatDuration(file.duration)}` : ""}). Choose an output resolution. I’ll show an estimated time once encoding begins. If another video is compressing, this one can wait in the queue.`,
+      resolutionKeyboard(),
+    ).catch(async (error: unknown) => {
+      logger.warn(
+        { code: errorName(error) },
+        "Could not update the uploaded-video status message",
+      );
+      const fallback = await sendMessage(
+        message.chat.id,
+        "Your video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 720p.",
+        resolutionKeyboard(),
+      ).catch(() => undefined);
+      if (fallback) pending.statusMessageId = fallback.message_id;
     });
+    if (preparation.cancelled) {
+      pendingVideos.delete(id);
+      await removeOwnedInput(fetched.file_path);
+      await editMessage(
+        message.chat.id,
+        pending.statusMessageId,
+        "Upload preparation cancelled.",
+      ).catch(() => undefined);
+    }
   } finally {
-    preparingVideos.delete(key);
+    preparingVideos.delete(id);
   }
 }
 
 async function prepareVideoFromUrl(
   message: TelegramMessage,
   url: string,
+  source: "url" | "tiktok" = "url",
 ): Promise<void> {
   const userId = message.from?.id;
   if (userId == null) return;
   const key = makeSessionKey(message.chat.id, userId);
 
-  if (activeJob) {
-    await sendMessage(
-      message.chat.id,
-      "A video is being compressed right now. Please try again when it is finished.",
-    );
-    return;
-  }
-  if (pendingVideos.has(key)) {
-    await sendMessage(
-      message.chat.id,
-      "You already have a video waiting for a resolution. Choose one below or send /cancel first.",
-    );
-    return;
-  }
-  if (preparingVideos.size >= MAX_PREPARING_UPLOADS) {
-    await sendMessage(
-      message.chat.id,
-      "Another video is being prepared. Please wait for it to finish before sending another link.",
-    );
-    return;
-  }
+  if (!canPrepareAnotherVideo(message.chat.id)) return;
 
+  const id = randomUUID();
   const inputPath = path.join(JOBS_DIR, `${randomUUID()}.download`);
   const abortController = new AbortController();
   const preparation: PreparingVideo = {
+    id,
     key,
     chatId: message.chat.id,
-    source: "url",
+    source,
     startedAt: Date.now(),
     cancelled: false,
     abortController,
   };
-  preparingVideos.set(key, preparation);
+  preparingVideos.set(id, preparation);
   let fileTransferredToPending = false;
 
   try {
     const status = await sendMessage(
       message.chat.id,
-      "Downloading the direct video link (maximum 4 GB). You’ll choose an output resolution when the file is ready.",
+      source === "tiktok"
+        ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
+        : "Downloading the direct video link (maximum 4 GB). You’ll choose an output resolution when the file is ready.",
     );
     preparation.statusMessageId = status.message_id;
 
     let lastProgressAt = Date.now();
     let lastProgressPercent = -10;
-    const downloadedBytes = await downloadRemoteVideo(url, inputPath, {
-      maxBytes: videoLimits.maxInputBytes,
-      signal: abortController.signal,
-      onProgress: (progress) => {
-        preparation.fileSize = progress.downloadedBytes;
+    const reportDownloadProgress = (
+      downloadedBytes: number,
+      totalBytes?: number,
+    ): void => {
+        preparation.fileSize = downloadedBytes;
         const now = Date.now();
         const percent =
-          progress.totalBytes && progress.totalBytes > 0
-            ? Math.floor((progress.downloadedBytes / progress.totalBytes) * 100)
+          totalBytes && totalBytes > 0
+            ? Math.floor((downloadedBytes / totalBytes) * 100)
             : null;
         if (
           now - lastProgressAt >= 15_000 ||
@@ -491,16 +538,31 @@ async function prepareVideoFromUrl(
           if (percent != null) lastProgressPercent = percent;
           const progressLabel =
             percent == null
-              ? formatBytes(progress.downloadedBytes)
+              ? formatBytes(downloadedBytes)
               : `${percent}%`;
           void editMessage(
             message.chat.id,
             status.message_id,
-            `Downloading video: ${progressLabel} (${formatBytes(progress.downloadedBytes)}). Send /cancel to stop.`,
+            `${source === "tiktok" ? "Fetching TikTok video" : "Downloading video"}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
           ).catch(() => undefined);
         }
-      },
-    });
+    };
+    const downloadedBytes =
+      source === "tiktok"
+        ? await downloadTikTokVideo(url, inputPath, {
+            maxBytes: videoLimits.maxInputBytes,
+            signal: abortController.signal,
+            onProgress: (bytes) => reportDownloadProgress(bytes),
+          })
+        : await downloadRemoteVideo(url, inputPath, {
+            maxBytes: videoLimits.maxInputBytes,
+            signal: abortController.signal,
+            onProgress: (progress) =>
+              reportDownloadProgress(
+                progress.downloadedBytes,
+                progress.totalBytes,
+              ),
+          });
 
     if (preparation.cancelled) {
       await unlink(inputPath).catch(() => undefined);
@@ -523,14 +585,12 @@ async function prepareVideoFromUrl(
 
     preparation.fileSize = localFile.size;
     const parsedUrl = new URL(url);
-    const fileName = path.basename(parsedUrl.pathname) || "linked-video";
-    await editMessage(
-      message.chat.id,
-      status.message_id,
-      `Video ready (original size: ${formatBytes(localFile.size)}). Choose an output resolution. I’ll show the encoding countdown once compression begins.`,
-      resolutionKeyboard(),
-    );
-    pendingVideos.set(key, {
+    const fileName =
+      source === "tiktok"
+        ? "tiktok-video.mp4"
+        : path.basename(parsedUrl.pathname);
+    const pending: PendingVideo = {
+      id,
       key,
       chatId: message.chat.id,
       fileSize: localFile.size,
@@ -538,13 +598,43 @@ async function prepareVideoFromUrl(
       filePath: inputPath,
       statusMessageId: status.message_id,
       expiresAt: Date.now() + PENDING_TTL_MS,
+    };
+    pendingVideos.set(id, pending);
+    await editMessage(
+      message.chat.id,
+      status.message_id,
+      `Video ready (original size: ${formatBytes(localFile.size)}). Choose an output resolution. I’ll show the encoding countdown once compression begins. If another video is compressing, this one can wait in the queue.`,
+      resolutionKeyboard(),
+    ).catch(async (error: unknown) => {
+      logger.warn(
+        { code: errorName(error) },
+        "Could not update the linked-video status message",
+      );
+      const fallback = await sendMessage(
+        message.chat.id,
+        "Your linked video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 720p.",
+        resolutionKeyboard(),
+      ).catch(() => undefined);
+      if (fallback) pending.statusMessageId = fallback.message_id;
     });
+    if (preparation.cancelled) {
+      pendingVideos.delete(id);
+      await removeOwnedInput(inputPath);
+      await editMessage(
+        message.chat.id,
+        pending.statusMessageId,
+        "Video download cancelled.",
+      ).catch(() => undefined);
+      return;
+    }
     fileTransferredToPending = true;
   } catch (error) {
     const cancelled = preparation.cancelled || abortController.signal.aborted;
     const userMessage = cancelled
       ? "Video download cancelled."
-      : error instanceof RemoteVideoDownloadError
+      : error instanceof TikTokDownloadError
+        ? tiktokFailureMessage(error)
+        : error instanceof RemoteVideoDownloadError
         ? error.message
         : "I couldn’t download that video link. Check it and try again.";
     if (preparation.statusMessageId != null) {
@@ -563,7 +653,7 @@ async function prepareVideoFromUrl(
       );
     }
   } finally {
-    preparingVideos.delete(key);
+    preparingVideos.delete(id);
     if (!fileTransferredToPending) {
       await unlink(inputPath).catch(() => undefined);
     }
@@ -618,9 +708,9 @@ async function removeOwnedInput(filePath: string): Promise<void> {
 }
 
 function clearExpiredPendingVideos(): void {
-  for (const [key, pending] of pendingVideos) {
+  for (const [id, pending] of pendingVideos) {
     if (pending.expiresAt < Date.now()) {
-      pendingVideos.delete(key);
+      pendingVideos.delete(id);
       void removeOwnedInput(pending.filePath);
       void editMessage(
         pending.chatId,
@@ -628,6 +718,16 @@ function clearExpiredPendingVideos(): void {
         "This video selection expired. Send the video again when you are ready.",
       ).catch(() => undefined);
     }
+  }
+  for (const entry of compressionQueue.removeWhere(
+    (queued) => queued.pending.expiresAt < Date.now(),
+  )) {
+    void removeOwnedInput(entry.pending.filePath);
+    void editMessage(
+      entry.pending.chatId,
+      entry.pending.statusMessageId,
+      "This queued video expired before compression began. Send it again when you are ready.",
+    ).catch(() => undefined);
   }
 }
 
@@ -651,13 +751,15 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, or paste a direct public link to a video file.",
+        "Send me a video up to 4 GB, paste a direct public link to a video file, or send a public TikTok post link.",
+        "TikTok links use yt-dlp without an API key, login, or browser cookies. Private and login-gated posts are not supported.",
         "Web pages and streaming-platform links are not direct downloads.",
         "Choose a resolution from the buttons, or enter a custom size such as 720p or 1280x720.",
         "",
-        "Use /status to check a job and /cancel to stop or clear it.",
+        "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
+        "Compression is one video at a time; other videos can be prepared and wait in a bounded queue.",
       ].join("\n"),
     );
     return;
@@ -665,36 +767,39 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   if (text?.startsWith("/status")) {
     const key = userId == null ? "" : makeSessionKey(message.chat.id, userId);
+    const queued = key
+      ? compressionQueue
+          .toArray()
+          .filter((entry) => entry.pending.key === key)
+      : [];
+    const prepared = key ? pendingForSession(key) : [];
+    const preparing = key ? preparationsForSession(key) : [];
     if (activeJob?.key === key) {
-      await sendMessage(message.chat.id, activeJob.statusText);
-    } else if (key && pendingVideos.has(key)) {
-      const pending = pendingVideos.get(key);
-      const duration =
-        pending?.durationSeconds != null
-          ? ` (${formatDuration(pending.durationSeconds)})`
-          : "";
+      const waiting =
+        queued.length > 0 ? ` You also have ${queued.length} video(s) queued.` : "";
       await sendMessage(
         message.chat.id,
-        `Your video${duration} is ready. Choose a resolution using the buttons above.`,
+        `${activeJob.statusText}${waiting}`,
       );
-    } else if (key && preparingVideos.has(key)) {
-      const preparation = preparingVideos.get(key);
-      const details = [
-        preparation?.fileSize != null
-          ? preparation.source === "url"
-            ? `${formatBytes(preparation.fileSize)} downloaded`
-            : formatBytes(preparation.fileSize)
-          : undefined,
-        preparation?.durationSeconds != null
-          ? formatDuration(preparation.durationSeconds)
-          : undefined,
-      ].filter((part): part is string => Boolean(part));
-      const elapsed = preparation
-        ? formatDuration((Date.now() - preparation.startedAt) / 1_000)
-        : "";
+    } else if (queued.length > 0) {
       await sendMessage(
         message.chat.id,
-        `Your ${preparation?.source === "url" ? "linked " : ""}video${details.length ? ` (${details.join(" · ")})` : ""} is still being prepared${elapsed ? `; this has taken ${elapsed}` : ""}. Compression hasn’t started yet. You’ll get a resolution choice when the file is ready.`,
+        `You have ${queued.length} video(s) waiting in the compression queue.`,
+      );
+    } else if (prepared.length > 0) {
+      await sendMessage(
+        message.chat.id,
+        `You have ${prepared.length} video(s) ready. Use the resolution buttons on the message for the video you want to compress.`,
+      );
+    } else if (preparing.length > 0) {
+      const elapsed = Math.max(
+        ...preparing.map((preparation) =>
+          Math.round((Date.now() - preparation.startedAt) / 1_000),
+        ),
+      );
+      await sendMessage(
+        message.chat.id,
+        `${preparing.length} video(s) are being prepared${elapsed ? `; the oldest has taken ${formatDuration(elapsed)}` : ""}. Compression has not started for those videos.`,
       );
     } else {
       await sendMessage(message.chat.id, "No video is waiting or processing.");
@@ -704,9 +809,39 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   if (text?.startsWith("/cancel")) {
     const key = userId == null ? "" : makeSessionKey(message.chat.id, userId);
-    const pending = key ? pendingVideos.get(key) : undefined;
+    const cancelActive = /^\/cancel(?:@\w+)?\s+active\b/i.test(text);
+    if (cancelActive && activeJob?.key === key) {
+      activeJob.cancelled = true;
+      activeJob.child?.kill("SIGTERM");
+      await sendMessage(message.chat.id, "Stopping compression...");
+      return;
+    }
+    const queued = key
+      ? compressionQueue.removeFirst((entry) => entry.pending.key === key)
+      : undefined;
+    if (queued) {
+      const preparation = preparingVideos.get(queued.pending.id);
+      if (preparation) {
+        preparation.cancelled = true;
+        preparation.abortController?.abort();
+      }
+      await removeOwnedInput(queued.pending.filePath);
+      await editMessage(
+        queued.pending.chatId,
+        queued.pending.statusMessageId,
+        "Queued video cancelled.",
+      ).catch(() => undefined);
+      await sendMessage(message.chat.id, "Your next queued video was cancelled.");
+      return;
+    }
+    const pending = key ? pendingForSession(key)[0] : undefined;
     if (pending) {
-      pendingVideos.delete(key);
+      const pendingPreparation = preparingVideos.get(pending.id);
+      if (pendingPreparation) {
+        pendingPreparation.cancelled = true;
+        pendingPreparation.abortController?.abort();
+      }
+      pendingVideos.delete(pending.id);
       await removeOwnedInput(pending.filePath);
       await editMessage(
         pending.chatId,
@@ -716,7 +851,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await sendMessage(message.chat.id, "Your waiting video was cancelled.");
       return;
     }
-    const preparation = key ? preparingVideos.get(key) : undefined;
+    const preparation = key ? preparationsForSession(key)[0] : undefined;
     if (preparation) {
       preparation.cancelled = true;
       preparation.abortController?.abort();
@@ -724,14 +859,14 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         await editMessage(
           preparation.chatId,
           preparation.statusMessageId,
-          preparation.source === "url"
+          preparation.source !== "upload"
             ? "Cancelling the video download..."
             : "Cancelling upload preparation. Telegram may take a little while to finish the transfer.",
         ).catch(() => undefined);
       }
       await sendMessage(
         message.chat.id,
-        preparation.source === "url"
+        preparation.source !== "upload"
           ? "The video download is being cancelled."
           : "Upload preparation will be cancelled when Telegram finishes the transfer.",
       );
@@ -750,21 +885,19 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
-  if (userId != null && text) {
-    const key = makeSessionKey(message.chat.id, userId);
-    const pending = pendingVideos.get(key);
-    if (pending && !text.startsWith("/")) {
-      const resolution = parseCustomResolution(text);
-      if (!resolution) {
-        await sendMessage(
-          message.chat.id,
-          "Enter a size like 720p or 1280x720. Each dimension must be between 144 and 7680 pixels.",
-        );
-        return;
-      }
-      await beginCompression(pending, resolution);
-      return;
-    }
+  const tiktokUrl = text ? findTikTokUrl(text) : null;
+  if (tiktokUrl) {
+    void prepareVideoFromUrl(message, tiktokUrl, "tiktok").catch((error: unknown) => {
+      logger.warn(
+        { code: errorName(error), updateType: "tiktok_url" },
+        "Could not prepare a TikTok link",
+      );
+      void sendMessage(
+        message.chat.id,
+        tiktokFailureMessage(error),
+      ).catch(() => undefined);
+    });
+    return;
   }
 
   if (text && isHttpUrl(text)) {
@@ -779,6 +912,34 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       ).catch(() => undefined);
     });
     return;
+  }
+
+  if (userId != null && text && !text.startsWith("/")) {
+    const key = makeSessionKey(message.chat.id, userId);
+    const ready = pendingForSession(key);
+    const pending =
+      ready.find((video) => video.awaitingCustomResolution) ??
+      (ready.length === 1 ? ready[0] : undefined);
+    if (pending) {
+      const resolution = parseCustomResolution(text);
+      if (!resolution) {
+        await sendMessage(
+          message.chat.id,
+          "Enter a size like 720p or 1280x720. Each dimension must be between 144 and 7680 pixels.",
+        );
+        return;
+      }
+      pending.awaitingCustomResolution = false;
+      await beginCompression(pending, resolution);
+      return;
+    }
+    if (ready.length > 1 && parseCustomResolution(text)) {
+      void sendMessage(
+        message.chat.id,
+        "Choose Custom size on the message for the video you want to compress, then send the target size.",
+      );
+      return;
+    }
   }
 
   const file = message.video
@@ -815,10 +976,13 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     return;
   }
   const key = makeSessionKey(message.chat.id, callback.from.id);
-  const pending = pendingVideos.get(key);
+  const pending = [...pendingVideos.values()].find(
+    (video) =>
+      video.key === key && video.statusMessageId === message.message_id,
+  );
   if (!pending || pending.expiresAt < Date.now()) {
     if (pending) {
-      pendingVideos.delete(key);
+      pendingVideos.delete(pending.id);
       await removeOwnedInput(pending.filePath);
     }
     await answerCallback(callback.id, "This video selection expired.");
@@ -827,17 +991,23 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
 
   const choice = callback.data.replace("resolution:", "");
   if (choice === "cancel") {
-    pendingVideos.delete(key);
+    const preparation = preparingVideos.get(pending.id);
+    if (preparation) {
+      preparation.cancelled = true;
+      preparation.abortController?.abort();
+    }
+    pendingVideos.delete(pending.id);
     await answerCallback(callback.id, "Video cancelled.");
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
       "Video cancelled. Send another video whenever you are ready.",
-    );
+    ).catch(() => undefined);
     await removeOwnedInput(pending.filePath);
     return;
   }
   if (choice === "custom") {
+    pending.awaitingCustomResolution = true;
     await answerCallback(callback.id);
     await editMessage(
       pending.chatId,
@@ -858,9 +1028,12 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     return;
   }
 
+  const queued = Boolean(activeJob || compressionQueue.size > 0);
   await answerCallback(
     callback.id,
-    `Starting ${resolution.label} compression.`,
+    queued
+      ? `Added ${resolution.label} video to the queue.`
+      : `Starting ${resolution.label} compression.`,
   );
   await beginCompression(pending, resolution);
 }
@@ -869,15 +1042,28 @@ async function beginCompression(
   pending: PendingVideo,
   resolution: VideoResolution,
 ): Promise<void> {
+  pendingVideos.delete(pending.id);
   if (activeJob) {
-    await sendMessage(
+    if (!compressionQueue.enqueue({ pending, resolution })) {
+      pendingVideos.set(pending.id, pending);
+      await editMessage(
+        pending.chatId,
+        pending.statusMessageId,
+        "The compression queue is full. Your video is still ready; try again when a queued video finishes.",
+        resolutionKeyboard(),
+      ).catch(() => undefined);
+      return;
+    }
+    await editMessage(
       pending.chatId,
-      `Another video is currently processing. This ${formatBytes(pending.fileSize)} video is still waiting; try again when the current job finishes.`,
-    );
+      pending.statusMessageId,
+      `Added to the compression queue at position ${compressionQueue.size + 1}. Your ${resolution.label} video will start after the current job.`,
+    ).catch(() => undefined);
     return;
   }
 
   const job: ActiveJob = {
+    videoId: pending.id,
     key: pending.key,
     chatId: pending.chatId,
     cancelled: false,
@@ -891,7 +1077,6 @@ async function beginCompression(
     attemptStartedAt: Date.now(),
   };
   activeJob = job;
-  pendingVideos.delete(pending.key);
   await editMessage(
     pending.chatId,
     pending.statusMessageId,
@@ -901,14 +1086,36 @@ async function beginCompression(
   void runCompressionJob(job, pending, resolution);
 }
 
+function startNextQueuedCompression(): void {
+  if (activeJob || stopping) return;
+  const next = compressionQueue.dequeue();
+  if (!next) return;
+  if (next.pending.expiresAt < Date.now()) {
+    void removeOwnedInput(next.pending.filePath);
+    void editMessage(
+      next.pending.chatId,
+      next.pending.statusMessageId,
+      "This queued video expired before compression began. Send it again when you are ready.",
+    ).catch(() => undefined);
+    startNextQueuedCompression();
+    return;
+  }
+  void beginCompression(next.pending, next.resolution);
+}
+
 async function runCompressionJob(
   job: ActiveJob,
   pending: PendingVideo,
   resolution: VideoResolution,
 ): Promise<void> {
   let inputPath: string | null = null;
-  const outputPath = path.join(JOBS_DIR, `${randomUUID()}.mp4`);
+  const outputDirectory = path.join(JOBS_DIR, randomUUID());
+  const outputPath = path.join(
+    outputDirectory,
+    compressedVideoFileName(pending.fileName),
+  );
   try {
+    await mkdir(outputDirectory, { recursive: true });
     inputPath = pending.filePath;
     const sourceStat = await stat(inputPath).catch(() => null);
     if (!sourceStat?.isFile()) {
@@ -1033,8 +1240,12 @@ async function runCompressionJob(
     ).catch(() => undefined);
   } finally {
     await unlink(outputPath).catch(() => undefined);
+    await rmdir(outputDirectory).catch(() => undefined);
     if (inputPath) await removeOwnedInput(inputPath);
-    if (activeJob === job) activeJob = null;
+    if (activeJob === job) {
+      activeJob = null;
+      startNextQueuedCompression();
+    }
   }
 }
 
@@ -1223,13 +1434,13 @@ export async function startTelegramVideoBot(): Promise<() => void> {
       commands: [
         { command: "start", description: "Start the video compressor" },
         { command: "help", description: "Show usage instructions" },
-        { command: "status", description: "Check your current job" },
-        { command: "cancel", description: "Cancel a waiting or active job" },
+        { command: "status", description: "Check active and queued videos" },
+        { command: "cancel", description: "Cancel the next waiting video" },
       ],
     });
     await telegramCall("setMyDescription", {
       description:
-        "Compress videos to the resolution you choose. Send a video, select a preset or custom size, and receive the compressed file here.",
+        "Compress videos from uploads, direct links, or public TikTok posts. Select a preset or custom resolution and receive the compressed file here.",
     });
     await telegramCall("setMyShortDescription", {
       short_description: "Compress videos to your chosen resolution.",
@@ -1254,6 +1465,17 @@ export async function startTelegramVideoBot(): Promise<() => void> {
 export function stopTelegramVideoBot(): void {
   stopping = true;
   activeJob?.child?.kill("SIGTERM");
+  for (const preparation of preparingVideos.values()) {
+    preparation.cancelled = true;
+    preparation.abortController?.abort();
+  }
+  for (const pending of pendingVideos.values()) {
+    void removeOwnedInput(pending.filePath);
+  }
+  for (const queued of compressionQueue.clear()) {
+    void removeOwnedInput(queued.pending.filePath);
+  }
+  pendingVideos.clear();
   localApiProcess?.kill("SIGTERM");
   localApiProcess = null;
   botToken = "";

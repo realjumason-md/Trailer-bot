@@ -30,6 +30,26 @@ const server = app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
+  const botVariables = [
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_API_ID",
+    "TELEGRAM_API_HASH",
+  ] as const;
+  const missingBotVariables = botVariables.filter(
+    (variable) => !process.env[variable],
+  );
+  if (
+    process.env["NODE_ENV"] !== "production" &&
+    missingBotVariables.length === botVariables.length
+  ) {
+    logger.warn(
+      { missingBotVariables },
+      "Telegram polling is disabled in development until bot settings are configured",
+    );
+    if (!shuttingDown) setApplicationReady(true);
+    return;
+  }
+
   void startTelegramVideoBot()
     .then(() => {
       if (!shuttingDown) setApplicationReady(true);

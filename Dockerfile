@@ -24,7 +24,9 @@ RUN apk add --no-cache \
     ffmpeg \
     su-exec \
     libstdc++ \
-    openssl
+    openssl \
+    yt-dlp \
+  && yt-dlp --version
 
 # Copy the compatible binary
 COPY --from=telegram-api /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api

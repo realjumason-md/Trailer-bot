@@ -6,7 +6,7 @@ Source workspace for a Telegram bot that compresses uploaded videos to a chosen 
 
 - Node.js 24 or compatible
 - pnpm
-- Docker (for the Railway deployment; it installs FFmpeg and Telegram's local Bot API server)
+- Docker (for the Railway deployment; it installs FFmpeg, yt-dlp, and Telegram's local Bot API server)
 
 ## Configure
 
@@ -25,6 +25,7 @@ Before first moving a bot from Telegram's hosted Bot API to a local Bot API serv
 ```sh
 pnpm install
 pnpm --filter @workspace/api-server run typecheck
+pnpm --filter @workspace/api-server run test
 pnpm --filter @workspace/api-server run dev
 ```
 
@@ -32,7 +33,7 @@ The API health check is available at `/api/healthz`. It returns a successful res
 
 ## Deploy to Railway
 
-Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot API server and installs FFmpeg and `ffprobe`, so the service does not depend on packages preinstalled in the Railway image.
+Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot API server and installs FFmpeg, `ffprobe`, and yt-dlp, so the service does not depend on packages preinstalled in the Railway image.
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
 2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video and the compressed output at the same time.
@@ -46,10 +47,12 @@ The service does not need a public domain to poll Telegram. If you add one, the 
 
 - Accepts video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links to video files up to 4 GB. Web pages and streaming-platform or playlist links are not downloaded.
+- Accepts public TikTok post and share links through yt-dlp. No API key, login, or browser cookies are used; private, login-gated, or otherwise unavailable posts are rejected with a chat message. Public availability may vary by region or TikTok changes.
 - After the upload is prepared, asks the user to choose a preset or custom resolution.
 - Shows the original file size during compression, with progress and a countdown based on the encoder's measured speed.
-- Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit.
-- Processes one compression job at a time.
+- Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit, keeping the source filename when available (`compressed-video.mp4` otherwise).
+- Prepares up to two uploads or links at a time and compresses one video at a time. Other videos can wait in a bounded FIFO queue (five queued jobs maximum).
+- `/status` shows active, queued, prepared, or downloading work. `/cancel` cancels the next waiting item; `/cancel active` stops the current compression.
 
 ## Source layout
 
