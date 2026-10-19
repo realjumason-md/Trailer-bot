@@ -1,0 +1,1 @@
+- [GitHub push authentication](github-push-auth.md) — confirm write access separately when GitHub reads work but pushes fail.
