@@ -1,1 +1,2 @@
 - [GitHub push authentication](github-push-auth.md) — confirm write access separately when GitHub reads work but pushes fail.
+- [Video queue semantics](video-queue-behavior.md) — new uploads and links wait FIFO; only explicit active cancellation may stop current compression.
