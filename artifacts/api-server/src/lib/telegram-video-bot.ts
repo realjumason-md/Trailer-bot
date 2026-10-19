@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { FifoQueue } from "./fifo-queue";
 import { logger } from "./logger";
 import { compressedVideoFileName } from "./compressed-video-file-name";
+import { retryWithBackoff } from "./retry-with-backoff";
 import {
   downloadRemoteVideo,
   RemoteVideoDownloadError,
@@ -48,6 +49,7 @@ class TelegramTransportError extends Error {
   constructor(
     readonly method: string,
     readonly reason: string,
+    readonly causeCode?: string,
   ) {
     super(`Telegram ${method} request failed.`);
   }
@@ -185,7 +187,9 @@ function errorName(error: unknown): string {
     return `telegram_api_${error.apiCode}`;
   }
   if (error instanceof TelegramTransportError) {
-    return `telegram_${error.method}_${error.reason}`;
+    return `telegram_${error.method}_${error.reason}${
+      error.causeCode ? `_${error.causeCode}` : ""
+    }`;
   }
   if (error instanceof Error) return error.name;
   return "unknown_error";
@@ -197,6 +201,16 @@ function makeSessionKey(chatId: number, userId: number): string {
 
 function localBotApiUrl(method: string): string {
   return `${LOCAL_API_ROOT}/bot${botToken}/${method}`;
+}
+
+function transportCauseCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.cause == null) return undefined;
+  const cause = error.cause;
+  if (typeof cause !== "object" || !("code" in cause)) return undefined;
+  const code = cause.code;
+  return typeof code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(code)
+    ? code
+    : undefined;
 }
 
 async function telegramCall<T>(
@@ -216,6 +230,7 @@ async function telegramCall<T>(
     throw new TelegramTransportError(
       method,
       error instanceof Error ? error.name : "unknown_error",
+      transportCauseCode(error),
     );
   }
 
@@ -370,10 +385,30 @@ async function prepareVideo(
 
     let fetched: { file_path?: string };
     try {
-      fetched = await telegramCall<{ file_path?: string }>(
-        "getFile",
-        { file_id: file.file_id },
-        6 * 60 * 60 * 1000,
+      fetched = await retryWithBackoff(
+        () =>
+          telegramCall<{ file_path?: string }>(
+            "getFile",
+            { file_id: file.file_id },
+            6 * 60 * 60 * 1000,
+          ),
+        {
+          maxAttempts: 3,
+          delayMs: (failedAttempt) => failedAttempt * 500,
+          shouldRetry: (error) =>
+            error instanceof TelegramTransportError ||
+            (error instanceof TelegramApiError && error.apiCode >= 500),
+          onRetry: (error, nextAttempt, delayMilliseconds) => {
+            logger.warn(
+              {
+                code: errorName(error),
+                attempt: nextAttempt,
+                delayMilliseconds,
+              },
+              "Telegram getFile failed transiently; retrying upload preparation",
+            );
+          },
+        },
       );
     } catch (error) {
       logger.warn(
@@ -383,7 +418,7 @@ async function prepareVideo(
       await editMessage(
         message.chat.id,
         status.message_id,
-        "I couldn't prepare that video. Please send it again, or try a smaller file.",
+        "Telegram couldn't retrieve this upload, so it didn't enter the compression queue. It didn't cancel any other video. Please send it again or try a direct video link.",
       ).catch(() => undefined);
       return;
     }
@@ -955,7 +990,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       );
       void sendMessage(
         message.chat.id,
-        "I couldn't prepare that video. Please send it again, or try a smaller file.",
+        "Telegram couldn't retrieve this upload, so it didn't enter the compression queue. It didn't cancel any other video. Please send it again or try a direct video link.",
       ).catch(() => undefined);
     });
     return;
