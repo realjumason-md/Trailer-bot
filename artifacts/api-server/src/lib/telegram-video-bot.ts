@@ -105,6 +105,8 @@ type PendingVideo = {
   fileName: string;
   filePath: string;
   statusMessageId: number;
+  // This deadline applies only while a resolution choice is waiting from the user.
+  // A selected video stays valid while it waits in the compression queue.
   expiresAt: number;
   durationSeconds?: number;
   sourceWidth?: number;
@@ -754,16 +756,6 @@ function clearExpiredPendingVideos(): void {
       ).catch(() => undefined);
     }
   }
-  for (const entry of compressionQueue.removeWhere(
-    (queued) => queued.pending.expiresAt < Date.now(),
-  )) {
-    void removeOwnedInput(entry.pending.filePath);
-    void editMessage(
-      entry.pending.chatId,
-      entry.pending.statusMessageId,
-      "This queued video expired before compression began. Send it again when you are ready.",
-    ).catch(() => undefined);
-  }
 }
 
 function isVideoFile(file: TelegramFile | undefined): file is TelegramFile {
@@ -1125,16 +1117,6 @@ function startNextQueuedCompression(): void {
   if (activeJob || stopping) return;
   const next = compressionQueue.dequeue();
   if (!next) return;
-  if (next.pending.expiresAt < Date.now()) {
-    void removeOwnedInput(next.pending.filePath);
-    void editMessage(
-      next.pending.chatId,
-      next.pending.statusMessageId,
-      "This queued video expired before compression began. Send it again when you are ready.",
-    ).catch(() => undefined);
-    startNextQueuedCompression();
-    return;
-  }
   void beginCompression(next.pending, next.resolution);
 }
 

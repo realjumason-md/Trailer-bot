@@ -51,7 +51,7 @@ The service does not need a public domain to poll Telegram. If you add one, the 
 - After the upload is prepared, asks the user to choose a preset or custom resolution.
 - Shows the original file size during compression, with progress and a countdown based on the encoder's measured speed.
 - Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit, keeping the source filename when available (`compressed-video.mp4` otherwise).
-- Prepares up to two uploads or links at a time and compresses one video at a time. Other videos can wait in a bounded FIFO queue (five queued jobs maximum).
+- Prepares up to two uploads or links at a time and compresses one video at a time. Other videos can wait in a bounded FIFO queue (five queued jobs maximum); the 30-minute selection timeout does not apply after a video is queued.
 - `/status` shows active, queued, prepared, or downloading work. `/cancel` cancels the next waiting item; `/cancel active` stops the current compression.
 
 ## Source layout

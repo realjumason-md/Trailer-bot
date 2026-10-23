@@ -10,6 +10,19 @@ import { request as httpsRequest } from "node:https";
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 60_000;
 
+export function isCompletePartialResponse(
+  statusCode: number | undefined,
+  contentRange: string | undefined,
+): boolean {
+  if (statusCode !== 206 || !contentRange) return false;
+  const match = contentRange.match(/^bytes\s+0-(\d+)\/(\d+)$/i);
+  return Boolean(
+    match &&
+      Number(match[1]) + 1 === Number(match[2]) &&
+      Number(match[2]) > 0,
+  );
+}
+
 export class RemoteVideoDownloadError extends Error {
   constructor(message: string) {
     super(message);
@@ -253,7 +266,9 @@ function requestRemoteFile(
       headers: {
         accept: "video/*, application/octet-stream;q=0.9, */*;q=0.1",
         "accept-encoding": "identity",
-        "user-agent": "TrailerBot/1.0",
+        "user-agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        referer: `${url.origin}/`,
       },
       lookup: pinnedLookup,
       servername: url.protocol === "https:" ? url.hostname : undefined,
@@ -322,10 +337,15 @@ async function downloadRedirects(
     );
   }
 
-  if (response.statusCode !== 200) {
+  const completePartialResponse = isCompletePartialResponse(
+    response.statusCode,
+    response.headers["content-range"],
+  );
+  if (response.statusCode !== 200 && !completePartialResponse) {
+    const status = response.statusCode ?? "unknown";
     response.destroy();
     throw new RemoteVideoDownloadError(
-      "The download link did not return a video file. Check that it is publicly accessible.",
+      `The video host returned HTTP ${status} instead of a complete video file. Check that the link is public and try copying the direct download link again.`,
     );
   }
 
@@ -355,6 +375,8 @@ async function downloadRedirects(
   const totalBytes =
     Number.isFinite(declaredSize) && declaredSize >= 0
       ? declaredSize
+      : completePartialResponse
+        ? Number(response.headers["content-range"]?.match(/\/(\d+)$/)?.[1])
       : undefined;
   let downloadedBytes = 0;
   let initialBytes = Buffer.alloc(0);
@@ -407,6 +429,11 @@ async function downloadRedirects(
     if (downloadedBytes === 0) {
       throw new RemoteVideoDownloadError(
         "The download link returned an empty file.",
+      );
+    }
+    if (completePartialResponse && totalBytes !== downloadedBytes) {
+      throw new RemoteVideoDownloadError(
+        "The video host returned an incomplete video file. Please try the link again.",
       );
     }
     return downloadedBytes;
