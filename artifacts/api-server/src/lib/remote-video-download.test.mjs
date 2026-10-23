@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   downloadRemoteVideo,
+  isCompletePartialResponse,
   RemoteVideoDownloadError,
 } from "./remote-video-download.ts";
 
@@ -15,6 +16,14 @@ function options() {
     onProgress: () => undefined,
   };
 }
+
+test("accepts only a full-file partial-content response", () => {
+  assert.equal(isCompletePartialResponse(200, undefined), false);
+  assert.equal(isCompletePartialResponse(206, "bytes 0-999/1000"), true);
+  assert.equal(isCompletePartialResponse(206, "bytes 0-499/1000"), false);
+  assert.equal(isCompletePartialResponse(206, "bytes 100-999/1000"), false);
+  assert.equal(isCompletePartialResponse(206, "bytes */1000"), false);
+});
 
 test("rejects localhost and private-network download URLs before connecting", async () => {
   for (const url of [
