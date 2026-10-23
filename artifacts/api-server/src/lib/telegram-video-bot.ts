@@ -9,6 +9,11 @@ import { logger } from "./logger";
 import { compressedVideoFileName } from "./compressed-video-file-name";
 import { retryWithBackoff } from "./retry-with-backoff";
 import {
+  canAcceptVideo,
+  MAX_OUTSTANDING_VIDEOS,
+  MAX_WAITING_COMPRESSIONS,
+} from "./video-queue-limits";
+import {
   downloadRemoteVideo,
   RemoteVideoDownloadError,
 } from "./remote-video-download";
@@ -158,9 +163,6 @@ const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
 const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
-const MAX_PREPARING_VIDEOS = 2;
-const MAX_OUTSTANDING_VIDEOS = 6;
-const MAX_WAITING_COMPRESSIONS = MAX_OUTSTANDING_VIDEOS - 1;
 
 const PRESET_RESOLUTIONS: VideoResolution[] = [
   { label: "480p", maxWidth: 7680, maxHeight: 480 },
@@ -331,17 +333,10 @@ function outstandingVideoCount(): number {
 }
 
 function canPrepareAnotherVideo(chatId: number): boolean {
-  if (outstandingVideoCount() >= MAX_OUTSTANDING_VIDEOS) {
+  if (!canAcceptVideo(outstandingVideoCount())) {
     void sendMessage(
       chatId,
       "The video queue is full. Please wait for one of the current videos to finish.",
-    ).catch(() => undefined);
-    return false;
-  }
-  if (preparingVideos.size >= MAX_PREPARING_VIDEOS) {
-    void sendMessage(
-      chatId,
-      "Two videos are already being prepared. Please try again shortly.",
     ).catch(() => undefined);
     return false;
   }
@@ -786,7 +781,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
-        "Compression is one video at a time; other videos can be prepared and wait in a bounded queue.",
+        "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
       ].join("\n"),
     );
     return;
