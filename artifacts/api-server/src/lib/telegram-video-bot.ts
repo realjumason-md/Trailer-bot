@@ -8,6 +8,7 @@ import { FifoQueue } from "./fifo-queue";
 import { logger } from "./logger";
 import { compressedVideoFileName } from "./compressed-video-file-name";
 import { retryWithBackoff } from "./retry-with-backoff";
+import { getNextPendingVideoExpiry } from "./pending-video-expiration";
 import {
   canAcceptVideo,
   MAX_OUTSTANDING_VIDEOS,
@@ -111,7 +112,8 @@ type PendingVideo = {
   filePath: string;
   statusMessageId: number;
   // This deadline applies only while a resolution choice is waiting from the user.
-  // A selected video stays valid while it waits in the compression queue.
+  // A selected video stays valid in the compression queue, and unresolved choices
+  // get their deadline extended while a compression is active or queued.
   expiresAt: number;
   durationSeconds?: number;
   sourceWidth?: number;
@@ -740,8 +742,16 @@ async function removeOwnedInput(filePath: string): Promise<void> {
 }
 
 function clearExpiredPendingVideos(): void {
+  const now = Date.now();
+  const compressionBusy = Boolean(activeJob || compressionQueue.size > 0);
   for (const [id, pending] of pendingVideos) {
-    if (pending.expiresAt < Date.now()) {
+    const nextExpiry = getNextPendingVideoExpiry(
+      pending.expiresAt,
+      now,
+      PENDING_TTL_MS,
+      compressionBusy,
+    );
+    if (nextExpiry == null) {
       pendingVideos.delete(id);
       void removeOwnedInput(pending.filePath);
       void editMessage(
@@ -749,6 +759,8 @@ function clearExpiredPendingVideos(): void {
         pending.statusMessageId,
         "This video selection expired. Send the video again when you are ready.",
       ).catch(() => undefined);
+    } else {
+      pending.expiresAt = nextExpiry;
     }
   }
 }
@@ -1002,7 +1014,15 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     (video) =>
       video.key === key && video.statusMessageId === message.message_id,
   );
-  if (!pending || pending.expiresAt < Date.now()) {
+  const nextExpiry = pending
+    ? getNextPendingVideoExpiry(
+        pending.expiresAt,
+        Date.now(),
+        PENDING_TTL_MS,
+        Boolean(activeJob || compressionQueue.size > 0),
+      )
+    : null;
+  if (!pending || nextExpiry == null) {
     if (pending) {
       pendingVideos.delete(pending.id);
       await removeOwnedInput(pending.filePath);
@@ -1010,6 +1030,7 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     await answerCallback(callback.id, "This video selection expired.");
     return;
   }
+  pending.expiresAt = nextExpiry;
 
   const choice = callback.data.replace("resolution:", "");
   if (choice === "cancel") {
