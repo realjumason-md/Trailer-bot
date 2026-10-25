@@ -5,11 +5,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  downloadPublicSiteVideo,
   downloadTikTokVideo,
   findTikTokUrl,
+  publicVideoFailureMessage,
   TikTokDownloadError,
   tiktokFailureMessage,
 } from "./tiktok-link-handler.ts";
+import { RemoteVideoDownloadError } from "./remote-video-download.ts";
 
 const publicPost =
   "https://www.tiktok.com/@creator/video/1234567890123456789";
@@ -94,8 +97,10 @@ test("runs yt-dlp without cookies, config, bot credentials, or login and rejects
     const childEnvironment = await readFile(environmentLog, "utf8");
     assert.match(args, /--ignore-config/);
     assert.match(args, /--no-playlist/);
+    assert.match(args, /--proxy\nhttp:\/\/127\.0\.0\.1:\d+/);
     assert.doesNotMatch(args, /--cookies(?:-from-browser)?/);
     assert.doesNotMatch(childEnvironment, /TELEGRAM_BOT_TOKEN=/);
+    assert.match(childEnvironment, /HTTPS_PROXY=http:\/\/127\.0\.0\.1:\d+/);
   } finally {
     if (previousPath === undefined) delete process.env["YT_DLP_PATH"];
     else process.env["YT_DLP_PATH"] = previousPath;
@@ -105,6 +110,66 @@ test("runs yt-dlp without cookies, config, bot credentials, or login and rejects
   }
 });
 
+test("extracts public video pages through the guarded yt-dlp proxy", async () => {
+  const testDir = await mkdtemp(path.join(tmpdir(), "public-site-downloader-"));
+  const executable = path.join(testDir, "fake-yt-dlp");
+  const argumentLog = path.join(testDir, "arguments.txt");
+  const environmentLog = path.join(testDir, "environment.txt");
+  const previousPath = process.env["YT_DLP_PATH"];
+  const previousToken = process.env["TELEGRAM_BOT_TOKEN"];
+  await writeFile(
+    executable,
+    `#!/bin/sh\nprintf '%s\\n' "$@" > "${argumentLog}"\nenv | sort > "${environmentLog}"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then output="$2"; shift 2; else shift; fi\ndone\nvideo_path=$(printf '%s' "$output" | sed 's/%(ext)s/mp4/')\nprintf 'fake-video' > "$video_path"\n`,
+  );
+  await chmod(executable, 0o700);
+  process.env["YT_DLP_PATH"] = executable;
+  process.env["TELEGRAM_BOT_TOKEN"] = "must-not-reach-downloader";
+  const destination = path.join(testDir, "downloaded.mp4");
+  try {
+    const size = await downloadPublicSiteVideo(
+      "https://1.1.1.1/watch/example",
+      destination,
+      {
+        maxBytes: 4 * 1024 * 1024 * 1024,
+        signal: new AbortController().signal,
+        onProgress: () => undefined,
+      },
+    );
+    assert.equal(size, Buffer.byteLength("fake-video"));
+    assert.equal(await readFile(destination, "utf8"), "fake-video");
+    const args = await readFile(argumentLog, "utf8");
+    const childEnvironment = await readFile(environmentLog, "utf8");
+    assert.match(args, /--ignore-config/);
+    assert.match(args, /--no-playlist/);
+    assert.match(args, /--max-filesize\n4096M/);
+    assert.match(args, /--proxy\nhttp:\/\/127\.0\.0\.1:\d+/);
+    assert.doesNotMatch(args, /--cookies(?:-from-browser)?/);
+    assert.doesNotMatch(childEnvironment, /TELEGRAM_BOT_TOKEN=/);
+    assert.match(childEnvironment, /HTTP_PROXY=http:\/\/127\.0\.0\.1:\d+/);
+  } finally {
+    if (previousPath === undefined) delete process.env["YT_DLP_PATH"];
+    else process.env["YT_DLP_PATH"] = previousPath;
+    if (previousToken === undefined) delete process.env["TELEGRAM_BOT_TOKEN"];
+    else process.env["TELEGRAM_BOT_TOKEN"] = previousToken;
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects private site URLs before starting yt-dlp", async () => {
+  await assert.rejects(
+    downloadPublicSiteVideo(
+      "http://127.0.0.1/private-video",
+      path.join(tmpdir(), `${randomUUID()}.mp4`),
+      {
+        maxBytes: 4 * 1024 * 1024 * 1024,
+        signal: new AbortController().signal,
+        onProgress: () => undefined,
+      },
+    ),
+    RemoteVideoDownloadError,
+  );
+});
+
 test("limits user-facing errors to safe messages", () => {
   assert.match(
     tiktokFailureMessage(new TikTokDownloadError("public-only")),
@@ -112,6 +177,14 @@ test("limits user-facing errors to safe messages", () => {
   );
   assert.doesNotMatch(
     tiktokFailureMessage(new Error("extractor output with private data")),
+    /extractor output with private data/,
+  );
+  assert.match(
+    publicVideoFailureMessage(new TikTokDownloadError("public-only")),
+    /public.*without signing in/i,
+  );
+  assert.doesNotMatch(
+    publicVideoFailureMessage(new Error("extractor output with private data")),
     /extractor output with private data/,
   );
 });

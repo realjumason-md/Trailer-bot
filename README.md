@@ -46,12 +46,12 @@ The service does not need a public domain to poll Telegram. If you add one, the 
 ## Bot behavior
 
 - Accepts video uploads up to 4 GB.
-- Accepts direct public HTTP/HTTPS download links to video files up to 4 GB. Web pages and streaming-platform or playlist links are not downloaded.
-- Accepts public TikTok post and share links through yt-dlp. No API key, login, or browser cookies are used; private, login-gated, or otherwise unavailable posts are rejected with a chat message. Public availability may vary by region or TikTok changes.
+- Accepts direct public HTTP/HTTPS download links to video files up to 4 GB.
+- If a link opens a web page instead of a video file, tries yt-dlp extraction for public pages on supported sites, including TikTok. Site coverage and availability vary; private, login-gated, and DRM-protected videos are not supported. The bot does not use sign-ins or saved browser cookies.
 - After the upload is prepared, asks the user to choose a preset or custom resolution.
 - Shows the original file size during compression, with progress and a countdown based on the encoder's measured speed.
 - Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit, keeping the source filename when available (`compressed-video.mp4` otherwise).
-- Prepares up to two uploads or links at a time and compresses one video at a time. Other videos can wait in a bounded FIFO queue (five queued jobs maximum); the 30-minute selection timeout does not apply after a video is queued.
+- Accepts up to six outstanding videos per chat and compresses one video at a time. Other videos can wait in a bounded FIFO queue; the 30-minute selection timeout does not apply after a video is queued.
 - `/status` shows active, queued, prepared, or downloading work. `/cancel` cancels the next waiting item; `/cancel active` stops the current compression.
 
 ## Source layout

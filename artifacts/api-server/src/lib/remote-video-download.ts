@@ -35,7 +35,7 @@ type DownloadProgress = {
   totalBytes?: number;
 };
 
-type PublicAddress = {
+export type PublicAddress = {
   address: string;
   family: number;
 };
@@ -160,7 +160,7 @@ function isPublicAddress(address: string): boolean {
   return false;
 }
 
-function parseDownloadUrl(value: string): URL {
+export function parseDownloadUrl(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -185,7 +185,7 @@ function parseDownloadUrl(value: string): URL {
   return url;
 }
 
-async function resolvePublicAddress(url: URL): Promise<PublicAddress> {
+export async function resolvePublicAddress(url: URL): Promise<PublicAddress> {
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (
     hostname === "localhost" ||
