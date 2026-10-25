@@ -20,7 +20,9 @@ import {
 } from "./remote-video-download";
 import {
   downloadTikTokVideo,
+  downloadPublicSiteVideo,
   findTikTokUrl,
+  publicVideoFailureMessage,
   TikTokDownloadError,
   tiktokFailureMessage,
 } from "./tiktok-link-handler";
@@ -548,7 +550,7 @@ async function prepareVideoFromUrl(
       message.chat.id,
       source === "tiktok"
         ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
-        : "Downloading the direct video link (maximum 4 GB). You’ll choose an output resolution when the file is ready.",
+        : "Downloading the public video link (maximum 4 GB). If it opens a supported video page, I’ll try to extract the video. You’ll choose an output resolution when it’s ready.",
     );
     preparation.statusMessageId = status.message_id;
 
@@ -596,6 +598,19 @@ async function prepareVideoFromUrl(
                 progress.downloadedBytes,
                 progress.totalBytes,
               ),
+          }).catch(async (error: unknown) => {
+            if (
+              abortController.signal.aborted ||
+              (error instanceof RemoteVideoDownloadError &&
+                /4 GB/u.test(error.message))
+            ) {
+              throw error;
+            }
+            return downloadPublicSiteVideo(url, inputPath, {
+              maxBytes: videoLimits.maxInputBytes,
+              signal: abortController.signal,
+              onProgress: (bytes) => reportDownloadProgress(bytes),
+            });
           });
 
     if (preparation.cancelled) {
@@ -667,7 +682,9 @@ async function prepareVideoFromUrl(
     const userMessage = cancelled
       ? "Video download cancelled."
       : error instanceof TikTokDownloadError
-        ? tiktokFailureMessage(error)
+        ? source === "tiktok"
+          ? tiktokFailureMessage(error)
+          : publicVideoFailureMessage(error)
         : error instanceof RemoteVideoDownloadError
         ? error.message
         : "I couldn’t download that video link. Check it and try again.";
@@ -785,9 +802,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, paste a direct public link to a video file, or send a public TikTok post link.",
-        "TikTok links use yt-dlp without an API key, login, or browser cookies. Private and login-gated posts are not supported.",
-        "Web pages and streaming-platform links are not direct downloads.",
+        "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
+        "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
+        "The extractor does not support every website, and some pages may block automated access.",
         "Choose a resolution from the buttons, or enter a custom size such as 720p or 1280x720.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
@@ -942,7 +959,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       );
       void sendMessage(
         message.chat.id,
-        "I couldn’t prepare that video link. Paste a direct public download link and try again.",
+        "I couldn’t prepare that video link. Try a direct public video link or a public page from a supported site.",
       ).catch(() => undefined);
     });
     return;
@@ -1473,7 +1490,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     });
     await telegramCall("setMyDescription", {
       description:
-        "Compress videos from uploads, direct links, or public TikTok posts. Select a preset or custom resolution and receive the compressed file here.",
+        "Compress videos from uploads, direct links, or supported public video pages. Select a preset or custom resolution and receive the compressed file here.",
     });
     await telegramCall("setMyShortDescription", {
       short_description: "Compress videos to your chosen resolution.",

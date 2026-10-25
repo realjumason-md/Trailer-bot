@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import {
+  parseDownloadUrl,
+  RemoteVideoDownloadError,
+  resolvePublicAddress,
+} from "./remote-video-download.ts";
+import { startPublicEgressProxy } from "./public-egress-proxy.ts";
 
 const POST_HOSTS = new Set([
   "tiktok.com",
@@ -12,6 +18,9 @@ const POST_HOSTS = new Set([
 const SHORT_LINK_HOSTS = new Set(["vm.tiktok.com", "vt.tiktok.com"]);
 const MAX_STDERR_CHARS = 4_000;
 const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1_000;
+const SITE_DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+const SUPPORTED_VIDEO_EXTENSION =
+  /\.(?:mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|3gp|ts|flv)$/iu;
 
 export type TikTokDownloadErrorCode =
   | "invalid-link"
@@ -96,9 +105,33 @@ export function tiktokFailureMessage(error: unknown): string {
   }
 }
 
+export function publicVideoFailureMessage(error: unknown): string {
+  const code =
+    error instanceof TikTokDownloadError ? error.code : "download-failed";
+  switch (code) {
+    case "too-large":
+      return "That video is larger than this bot's 4 GB input limit.";
+    case "timeout":
+      return "The public video download timed out. Try another link.";
+    case "cancelled":
+      return "Video download cancelled.";
+    case "public-only":
+      return "I can only fetch videos that are public and accessible without signing in.";
+    case "downloader-missing":
+      return "Public video-page downloads are unavailable because yt-dlp is missing from this deployment.";
+    case "unsupported-format":
+      return "That page did not provide a supported video format.";
+    case "invalid-link":
+      return "Send a public HTTP or HTTPS video link.";
+    default:
+      return "I couldn't extract a public video from that page. It may be unsupported, unavailable, or require signing in.";
+  }
+}
+
 async function runYtDlp(
   url: string,
   outputDir: string,
+  outputBaseName: string,
   options: {
     maxBytes: number;
     timeoutMs: number;
@@ -106,140 +139,153 @@ async function runYtDlp(
     onProgress: (bytes: number) => void;
   },
 ): Promise<void> {
-  const args = [
-    "--ignore-config",
-    "--no-playlist",
-    "--no-progress",
-    "--socket-timeout",
-    "30",
-    "--retries",
-    "1",
-    "--format",
-    "best[ext=mp4]/best",
-    "--merge-output-format",
-    "mp4",
-    "--max-filesize",
-    `${Math.floor(options.maxBytes / (1024 * 1024))}M`,
-    "--output",
-    path.join(outputDir, "tiktok.%(ext)s"),
-    url,
-  ];
-  if (options.signal.aborted) throw new TikTokDownloadError("cancelled");
+  const proxy = await startPublicEgressProxy();
+  try {
+    if (options.signal.aborted) throw new TikTokDownloadError("cancelled");
+    const args = [
+      "--ignore-config",
+      "--no-playlist",
+      "--no-progress",
+      "--socket-timeout",
+      "30",
+      "--retries",
+      "1",
+      "--proxy",
+      proxy.url,
+      "--format",
+      "best[ext=mp4]/best",
+      "--merge-output-format",
+      "mp4",
+      "--max-filesize",
+      `${Math.floor(options.maxBytes / (1024 * 1024))}M`,
+      "--output",
+      path.join(outputDir, `${outputBaseName}.%(ext)s`),
+      url,
+    ];
 
-  await new Promise<void>((resolve, reject) => {
-    let child;
-    try {
-      child = spawn(process.env["YT_DLP_PATH"] || "yt-dlp", args, {
-        env: {
-          PATH: process.env["PATH"] ?? "",
-          HOME: outputDir,
-          TMPDIR: outputDir,
-          SSL_CERT_FILE:
-            process.env["SSL_CERT_FILE"] ??
-            process.env["NIX_SSL_CERT_FILE"] ??
-            "/etc/ssl/certs/ca-certificates.crt",
-          SSL_CERT_DIR: process.env["SSL_CERT_DIR"] ?? "/etc/ssl/certs",
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-        windowsHide: true,
-      });
-    } catch {
-      reject(new TikTokDownloadError("downloader-missing"));
-      return;
-    }
-
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    let tooLarge = false;
-    let cancelled = false;
-    let pendingSizeCheck: Promise<void> | null = null;
-    const finish = (error?: TikTokDownloadError): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutTimer);
-      clearInterval(sizeTimer);
-      options.signal.removeEventListener("abort", onAbort);
-      if (error) reject(error);
-      else resolve();
-    };
-    const checkOutputSize = (): Promise<void> => {
-      if (pendingSizeCheck) return pendingSizeCheck;
-      pendingSizeCheck = (async () => {
-        try {
-          const files = await readdir(outputDir, { withFileTypes: true });
-          let totalBytes = 0;
-          for (const file of files) {
-            if (!file.isFile()) continue;
-            totalBytes += (await stat(path.join(outputDir, file.name))).size;
-          }
-          try {
-            options.onProgress(totalBytes);
-          } catch {
-            // A progress notification must not interrupt the download.
-          }
-          if (totalBytes > options.maxBytes) {
-            tooLarge = true;
-            child.kill("SIGKILL");
-          }
-        } catch {
-          // The output directory may not contain a file until extraction starts.
-        }
-      })().finally(() => {
-        pendingSizeCheck = null;
-      });
-      return pendingSizeCheck;
-    };
-    const onAbort = (): void => {
-      cancelled = true;
-      child.kill("SIGKILL");
-    };
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, options.timeoutMs);
-    const sizeTimer = setInterval(() => void checkOutputSize(), 500);
-
-    options.signal.addEventListener("abort", onAbort, { once: true });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < MAX_STDERR_CHARS) {
-        stderr += chunk.toString().slice(0, MAX_STDERR_CHARS - stderr.length);
+    await new Promise<void>((resolve, reject) => {
+      let child;
+      try {
+        child = spawn(process.env["YT_DLP_PATH"] || "yt-dlp", args, {
+          env: {
+            PATH: process.env["PATH"] ?? "",
+            HOME: outputDir,
+            TMPDIR: outputDir,
+            HTTP_PROXY: proxy.url,
+            HTTPS_PROXY: proxy.url,
+            http_proxy: proxy.url,
+            https_proxy: proxy.url,
+            NO_PROXY: "",
+            no_proxy: "",
+            SSL_CERT_FILE:
+              process.env["SSL_CERT_FILE"] ??
+              process.env["NIX_SSL_CERT_FILE"] ??
+              "/etc/ssl/certs/ca-certificates.crt",
+            SSL_CERT_DIR: process.env["SSL_CERT_DIR"] ?? "/etc/ssl/certs",
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+          windowsHide: true,
+        });
+      } catch {
+        reject(new TikTokDownloadError("downloader-missing"));
+        return;
       }
-    });
-    child.once("error", (error: NodeJS.ErrnoException) => {
-      finish(
-        new TikTokDownloadError(
-          error.code === "ENOENT" ? "downloader-missing" : "download-failed",
-        ),
-      );
-    });
-    child.once("close", async (code) => {
-      if (settled) return;
-      clearTimeout(timeoutTimer);
-      clearInterval(sizeTimer);
-      if (pendingSizeCheck) await pendingSizeCheck;
-      await checkOutputSize();
-      if (tooLarge) {
-        finish(new TikTokDownloadError("too-large"));
-      } else if (cancelled || options.signal.aborted) {
-        finish(new TikTokDownloadError("cancelled"));
-      } else if (timedOut) {
-        finish(new TikTokDownloadError("timeout"));
-      } else if (code !== 0) {
-        const loginRequired =
-          /login required|private video|sign[- ]?in required|age[- ]?restricted/i.test(
-            stderr,
-          );
+
+      let stderr = "";
+      let settled = false;
+      let timedOut = false;
+      let tooLarge = false;
+      let cancelled = false;
+      let pendingSizeCheck: Promise<void> | null = null;
+      const finish = (error?: TikTokDownloadError): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        clearInterval(sizeTimer);
+        options.signal.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve();
+      };
+      const checkOutputSize = (): Promise<void> => {
+        if (pendingSizeCheck) return pendingSizeCheck;
+        pendingSizeCheck = (async () => {
+          try {
+            const files = await readdir(outputDir, { withFileTypes: true });
+            let totalBytes = 0;
+            for (const file of files) {
+              if (!file.isFile()) continue;
+              totalBytes += (await stat(path.join(outputDir, file.name))).size;
+            }
+            try {
+              options.onProgress(totalBytes);
+            } catch {
+              // A progress notification must not interrupt the download.
+            }
+            if (totalBytes > options.maxBytes) {
+              tooLarge = true;
+              child.kill("SIGKILL");
+            }
+          } catch {
+            // The output directory may not contain a file until extraction starts.
+          }
+        })().finally(() => {
+          pendingSizeCheck = null;
+        });
+        return pendingSizeCheck;
+      };
+      const onAbort = (): void => {
+        cancelled = true;
+        child.kill("SIGKILL");
+      };
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, options.timeoutMs);
+      const sizeTimer = setInterval(() => void checkOutputSize(), 500);
+
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderr.length < MAX_STDERR_CHARS) {
+          stderr += chunk.toString().slice(0, MAX_STDERR_CHARS - stderr.length);
+        }
+      });
+      child.once("error", (error: NodeJS.ErrnoException) => {
         finish(
           new TikTokDownloadError(
-            loginRequired ? "public-only" : "download-failed",
+            error.code === "ENOENT" ? "downloader-missing" : "download-failed",
           ),
         );
-      } else {
-        finish();
-      }
+      });
+      child.once("close", async (code) => {
+        if (settled) return;
+        clearTimeout(timeoutTimer);
+        clearInterval(sizeTimer);
+        if (pendingSizeCheck) await pendingSizeCheck;
+        await checkOutputSize();
+        if (tooLarge) {
+          finish(new TikTokDownloadError("too-large"));
+        } else if (cancelled || options.signal.aborted) {
+          finish(new TikTokDownloadError("cancelled"));
+        } else if (timedOut) {
+          finish(new TikTokDownloadError("timeout"));
+        } else if (code !== 0) {
+          const loginRequired =
+            /login required|private video|sign[- ]?in required|age[- ]?restricted/i.test(
+              stderr,
+            );
+          finish(
+            new TikTokDownloadError(
+              loginRequired ? "public-only" : "download-failed",
+            ),
+          );
+        } else {
+          finish();
+        }
+      });
     });
-  });
+  } finally {
+    await proxy.close().catch(() => undefined);
+  }
 }
 
 export async function downloadTikTokVideo(
@@ -259,7 +305,7 @@ export async function downloadTikTokVideo(
     path.join(path.dirname(destination), ".tiktok-download-"),
   );
   try {
-    await runYtDlp(url, outputDir, {
+    await runYtDlp(url, outputDir, "tiktok", {
       ...options,
       timeoutMs: options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
     });
@@ -274,6 +320,58 @@ export async function downloadTikTokVideo(
   } catch (error) {
     await rm(destination, { force: true }).catch(() => undefined);
     if (error instanceof TikTokDownloadError) throw error;
+    if (options.signal.aborted) throw new TikTokDownloadError("cancelled");
+    throw new TikTokDownloadError("download-failed");
+  } finally {
+    await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function downloadPublicSiteVideo(
+  inputUrl: string,
+  destination: string,
+  options: {
+    maxBytes: number;
+    signal: AbortSignal;
+    onProgress: (bytes: number) => void;
+    timeoutMs?: number;
+  },
+): Promise<number> {
+  let url: URL;
+  try {
+    url = parseDownloadUrl(inputUrl);
+    await resolvePublicAddress(url);
+  } catch (error) {
+    if (error instanceof RemoteVideoDownloadError) throw error;
+    throw new TikTokDownloadError("invalid-link");
+  }
+
+  const outputDir = await mkdtemp(
+    path.join(path.dirname(destination), ".site-video-download-"),
+  );
+  try {
+    await runYtDlp(url.toString(), outputDir, "video", {
+      ...options,
+      timeoutMs: options.timeoutMs ?? SITE_DOWNLOAD_TIMEOUT_MS,
+    });
+    const video = (await readdir(outputDir)).find((name) =>
+      SUPPORTED_VIDEO_EXTENSION.test(name),
+    );
+    if (!video) throw new TikTokDownloadError("unsupported-format");
+    const sourcePath = path.join(outputDir, video);
+    const result = await stat(sourcePath);
+    if (!result.size) throw new TikTokDownloadError("download-failed");
+    if (result.size > options.maxBytes) throw new TikTokDownloadError("too-large");
+    await rename(sourcePath, destination);
+    return result.size;
+  } catch (error) {
+    await rm(destination, { force: true }).catch(() => undefined);
+    if (
+      error instanceof TikTokDownloadError ||
+      error instanceof RemoteVideoDownloadError
+    ) {
+      throw error;
+    }
     if (options.signal.aborted) throw new TikTokDownloadError("cancelled");
     throw new TikTokDownloadError("download-failed");
   } finally {
