@@ -14,6 +14,7 @@ import {
   MAX_OUTSTANDING_VIDEOS,
   MAX_WAITING_COMPRESSIONS,
 } from "./video-queue-limits";
+import { parseRestartNotificationChatId } from "./restart-notification";
 import {
   downloadRemoteVideo,
   findHttpUrl,
@@ -83,6 +84,7 @@ type TelegramFile = {
 
 type TelegramChat = {
   id: number;
+  type?: string;
 };
 
 type TelegramMessage = {
@@ -805,7 +807,18 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
+        "Use /chatid in a private chat to get its ID for restart notifications.",
       ].join("\n"),
+    );
+    return;
+  }
+
+  if (text?.startsWith("/chatid")) {
+    await sendMessage(
+      message.chat.id,
+      message.chat.type === "private"
+        ? `Private chat ID: ${message.chat.id}\nSet this as TELEGRAM_RESTART_NOTIFICATION_CHAT_ID in Railway.`
+        : "For privacy, send /chatid in a private chat with this bot.",
     );
     return;
   }
@@ -1479,6 +1492,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
       commands: [
         { command: "start", description: "Start the video compressor" },
         { command: "help", description: "Show usage instructions" },
+        { command: "chatid", description: "Show this private chat's ID" },
         { command: "status", description: "Check active and queued videos" },
         { command: "cancel", description: "Cancel the next waiting video" },
       ],
@@ -1499,6 +1513,27 @@ export async function startTelegramVideoBot(): Promise<() => void> {
       "Telegram video compressor is ready",
     );
     void pollUpdates();
+
+    const configuredNotificationChatId =
+      process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"];
+    const notificationChatId = parseRestartNotificationChatId(
+      configuredNotificationChatId,
+    );
+    if (configuredNotificationChatId?.trim() && notificationChatId == null) {
+      logger.warn(
+        "TELEGRAM_RESTART_NOTIFICATION_CHAT_ID must be a positive private chat ID; startup notification is disabled",
+      );
+    } else if (notificationChatId != null) {
+      void sendMessage(
+        notificationChatId,
+        "The bot restarted successfully.",
+      ).catch((error: unknown) => {
+        logger.warn(
+          { code: errorName(error) },
+          "Could not send the startup notification",
+        );
+      });
+    }
 
     return stopTelegramVideoBot;
   } catch (error) {
