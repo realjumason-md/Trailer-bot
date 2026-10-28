@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   downloadRemoteVideo,
+  findHttpUrl,
   isCompletePartialResponse,
   RemoteVideoDownloadError,
 } from "./remote-video-download.ts";
@@ -23,6 +24,28 @@ test("accepts only a full-file partial-content response", () => {
   assert.equal(isCompletePartialResponse(206, "bytes 0-499/1000"), false);
   assert.equal(isCompletePartialResponse(206, "bytes 100-999/1000"), false);
   assert.equal(isCompletePartialResponse(206, "bytes */1000"), false);
+});
+
+test("finds an HTTP video URL surrounded by text or Markdown", () => {
+  assert.equal(
+    findHttpUrl("Download this clip: https://cdn.example/video.mp4."),
+    "https://cdn.example/video.mp4",
+  );
+  assert.equal(
+    findHttpUrl("[video](https://cdn.example/video.mp4)"),
+    "https://cdn.example/video.mp4",
+  );
+  assert.equal(
+    findHttpUrl(
+      "No link here, but https://cdn.example/video.mp4 is available.",
+    ),
+    "https://cdn.example/video.mp4",
+  );
+});
+
+test("ignores non-web and malformed links when extracting URLs", () => {
+  assert.equal(findHttpUrl("file:///tmp/video.mp4"), null);
+  assert.equal(findHttpUrl("There is no video link here."), null);
 });
 
 test("rejects localhost and private-network download URLs before connecting", async () => {

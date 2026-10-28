@@ -16,6 +16,7 @@ import {
 } from "./video-queue-limits";
 import {
   downloadRemoteVideo,
+  findHttpUrl,
   RemoteVideoDownloadError,
 } from "./remote-video-download";
 import {
@@ -787,10 +788,6 @@ function isVideoFile(file: TelegramFile | undefined): file is TelegramFile {
   );
 }
 
-function isHttpUrl(text: string): boolean {
-  return /^https?:\/\//i.test(text);
-}
-
 async function handleMessage(message: TelegramMessage): Promise<void> {
   const text = message.text?.trim();
   const userId = message.from?.id;
@@ -948,8 +945,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
-  if (text && isHttpUrl(text)) {
-    void prepareVideoFromUrl(message, text).catch((error: unknown) => {
+  const videoUrl = text ? findHttpUrl(text) : null;
+  if (videoUrl) {
+    void prepareVideoFromUrl(message, videoUrl).catch((error: unknown) => {
       logger.warn(
         { code: errorName(error), updateType: "video_url" },
         "Could not prepare a linked video",
