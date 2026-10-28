@@ -23,6 +23,22 @@ export function isCompletePartialResponse(
   );
 }
 
+export function findHttpUrl(text: string): string | null {
+  const candidates = text.match(/https?:\/\/[^\s<>"']+/giu) ?? [];
+  for (const candidate of candidates) {
+    const value = candidate.replace(/[),.!;:\]}]+$/u, "");
+    try {
+      const url = new URL(value);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return url.toString();
+      }
+    } catch {
+      // Ignore malformed links and keep looking for a usable URL.
+    }
+  }
+  return null;
+}
+
 export class RemoteVideoDownloadError extends Error {
   constructor(message: string) {
     super(message);
