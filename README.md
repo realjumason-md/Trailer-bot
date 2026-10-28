@@ -18,6 +18,8 @@ Required environment variables:
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 
+To receive a message after each successful bot startup, open a private chat with the bot, send `/start` and `/chatid`, then set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the returned ID in the local environment or Railway. The bot must have been started in that chat before Telegram allows it to send a message. A notification failure is logged and does not prevent the bot from starting.
+
 Before first moving a bot from Telegram's hosted Bot API to a local Bot API server, call Telegram's `logOut` method securely. This releases the hosted API session so the local server can receive updates. Do this for the migration, not on each restart. See the [Telegram Bot API documentation](https://core.telegram.org/bots/api#logout).
 
 ## Run
@@ -37,7 +39,7 @@ Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot 
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
 2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video and the compressed output at the same time.
-3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
+3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To receive restart messages, also set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from `/chatid`. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
 4. Set the Railway healthcheck path to `/api/healthz` and keep the service to one replica. This bot uses long polling and keeps its current job in process memory.
 5. If this bot is being moved from Telegram's hosted Bot API for the first time, call `logOut` once before starting this service. Do not call it on routine restarts or redeploys.
 
