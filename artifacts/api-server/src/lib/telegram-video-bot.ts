@@ -31,6 +31,7 @@ import {
   parseCustomResolution,
   VideoProcessingError,
   videoLimits,
+  PRESET_RESOLUTIONS,
   type CompressionProgress,
   type VideoInfo,
   type VideoResolution,
@@ -168,14 +169,6 @@ const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
 
-const PRESET_RESOLUTIONS: VideoResolution[] = [
-  { label: "480p", maxWidth: 7680, maxHeight: 480 },
-  { label: "720p", maxWidth: 7680, maxHeight: 720 },
-  { label: "1080p", maxWidth: 7680, maxHeight: 1080 },
-  { label: "1440p", maxWidth: 7680, maxHeight: 1440 },
-  { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160 },
-];
-
 let botToken = "";
 let stopping = false;
 let localApiProcess: ChildProcess | null = null;
@@ -293,7 +286,11 @@ function resolutionKeyboard(): Record<string, unknown> {
   return {
     inline_keyboard: [
       [
+        { text: "240p", callback_data: "resolution:240p" },
+        { text: "360p", callback_data: "resolution:360p" },
         { text: "480p", callback_data: "resolution:480p" },
+      ],
+      [
         { text: "720p", callback_data: "resolution:720p" },
         { text: "1080p", callback_data: "resolution:1080p" },
       ],
@@ -500,7 +497,7 @@ async function prepareVideo(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        "Your video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 720p.",
+        "Your video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 240p, 720p, or 1280x720.",
         resolutionKeyboard(),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -805,7 +802,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
         "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
         "The extractor does not support every website, and some pages may block automated access.",
-        "Choose a resolution from the buttons, or enter a custom size such as 720p or 1280x720.",
+        "Choose a preset from 240p to 2160p / 4K, or enter a custom size such as 720p or 1280x720.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",

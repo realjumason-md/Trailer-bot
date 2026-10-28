@@ -11,6 +11,16 @@ export type VideoResolution = {
   maxHeight: number;
 };
 
+export const PRESET_RESOLUTIONS: VideoResolution[] = [
+  { label: "240p", maxWidth: 7680, maxHeight: 240 },
+  { label: "360p", maxWidth: 7680, maxHeight: 360 },
+  { label: "480p", maxWidth: 7680, maxHeight: 480 },
+  { label: "720p", maxWidth: 7680, maxHeight: 720 },
+  { label: "1080p", maxWidth: 7680, maxHeight: 1080 },
+  { label: "1440p", maxWidth: 7680, maxHeight: 1440 },
+  { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160 },
+];
+
 export type VideoInfo = {
   width: number;
   height: number;
