@@ -8,6 +8,7 @@ import { FifoQueue } from "./fifo-queue";
 import { logger } from "./logger";
 import { compressedVideoFileName } from "./compressed-video-file-name";
 import { retryWithBackoff } from "./retry-with-backoff";
+import { buildCompressionResultCaption } from "./compression-result-caption";
 import { getNextPendingVideoExpiry } from "./pending-video-expiration";
 import {
   canAcceptVideo,
@@ -113,6 +114,8 @@ type PendingVideo = {
   id: string;
   key: string;
   chatId: number;
+  sourceMessageId: number;
+  sourceUrl?: string;
   fileSize: number;
   fileName: string;
   filePath: string;
@@ -478,6 +481,7 @@ async function prepareVideo(
       id,
       key,
       chatId: message.chat.id,
+      sourceMessageId: message.message_id,
       fileSize: localFile.size,
       fileName: file.file_name ?? "",
       filePath: fetched.file_path,
@@ -642,6 +646,8 @@ async function prepareVideoFromUrl(
       id,
       key,
       chatId: message.chat.id,
+      sourceMessageId: message.message_id,
+      sourceUrl: url,
       fileSize: localFile.size,
       fileName,
       filePath: inputPath,
@@ -806,6 +812,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
+        "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
         "Use /chatid in a private chat to get its ID for restart notifications.",
       ].join("\n"),
@@ -1268,10 +1275,15 @@ async function runCompressionJob(
       {
         chat_id: pending.chatId,
         video: pathToFileURL(result.outputPath).href,
+        reply_to_message_id: pending.sourceMessageId,
+        allow_sending_without_reply: true,
         duration: Math.max(1, Math.round(result.durationSeconds)),
         width: result.width,
         height: result.height,
-        caption: `Compressed to ${result.width}×${result.height} · original ${formatBytes(pending.fileSize)} → ${formatBytes(result.outputBytes)}`,
+        caption: buildCompressionResultCaption(
+          `Compressed to ${result.width}×${result.height} · original ${formatBytes(pending.fileSize)} → ${formatBytes(result.outputBytes)}`,
+          pending.sourceUrl,
+        ),
         supports_streaming: true,
       },
       6 * 60 * 60 * 1000,
