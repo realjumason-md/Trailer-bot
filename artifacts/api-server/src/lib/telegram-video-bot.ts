@@ -1213,7 +1213,7 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
-      "Send a target size such as 720p or 1280x720. The video will keep its aspect ratio and will not be enlarged.",
+      `Enter a target below ${pending.sourceWidth}×${pending.sourceHeight}, using NNNp or widthxheight format (for example, 960p or 1280x720). The aspect ratio is preserved; upscaling is rejected.`,
       {
         inline_keyboard: [
           [{ text: "Cancel", callback_data: "resolution:cancel" }],

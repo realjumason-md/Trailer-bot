@@ -17,26 +17,21 @@ test("offers 240p and 360p as selectable preset resolutions", () => {
   assert.equal(presetByLabel.get("240p")?.maxHeight, 240);
   assert.equal(presetByLabel.get("360p")?.maxHeight, 360);
   assert.equal(presetByLabel.get("420p")?.maxHeight, 420);
+  assert.equal(presetByLabel.get("960p")?.maxHeight, 960);
 });
 
-test("accepts 240p, 360p, and 420p as custom resolution inputs too", () => {
-  assert.deepEqual(parseCustomResolution("240p"), {
-    label: "240p",
+test("accepts arbitrary custom p targets", () => {
+  assert.deepEqual(parseCustomResolution("960p"), {
+    label: "960p",
     maxWidth: 7680,
-    maxHeight: 240,
-    shortSide: 240,
+    maxHeight: 960,
+    shortSide: 960,
   });
-  assert.deepEqual(parseCustomResolution("360p"), {
-    label: "360p",
+  assert.deepEqual(parseCustomResolution("999p"), {
+    label: "999p",
     maxWidth: 7680,
-    maxHeight: 360,
-    shortSide: 360,
-  });
-  assert.deepEqual(parseCustomResolution("420p"), {
-    label: "420p",
-    maxWidth: 7680,
-    maxHeight: 420,
-    shortSide: 420,
+    maxHeight: 999,
+    shortSide: 999,
   });
 });
 
@@ -47,15 +42,15 @@ test("only offers preset resolutions that reduce the source dimensions", () => {
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1920, 1080).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p"],
+    ["240p", "360p", "420p", "480p", "720p", "960p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(3840, 2160).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p", "1080p", "1440p"],
+    ["240p", "360p", "420p", "480p", "720p", "960p", "1080p", "1440p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1080, 1920).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p"],
+    ["240p", "360p", "420p", "480p", "720p", "960p"],
   );
 });
 
@@ -75,6 +70,15 @@ test("maps 420p to the correct landscape output dimensions", () => {
   assert.deepEqual(getOutputDimensions(1280, 720, preset), {
     width: 746,
     height: 420,
+  });
+});
+
+test("maps 960p to the correct 4K landscape output dimensions", () => {
+  const resolution = parseCustomResolution("960p");
+  assert.ok(resolution);
+  assert.deepEqual(getOutputDimensions(3840, 2160, resolution), {
+    width: 1706,
+    height: 960,
   });
 });
 

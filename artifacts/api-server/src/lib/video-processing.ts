@@ -18,6 +18,7 @@ export const PRESET_RESOLUTIONS: VideoResolution[] = [
   { label: "420p", maxWidth: 7680, maxHeight: 420, shortSide: 420 },
   { label: "480p", maxWidth: 7680, maxHeight: 480, shortSide: 480 },
   { label: "720p", maxWidth: 7680, maxHeight: 720, shortSide: 720 },
+  { label: "960p", maxWidth: 7680, maxHeight: 960, shortSide: 960 },
   { label: "1080p", maxWidth: 7680, maxHeight: 1080, shortSide: 1080 },
   { label: "1440p", maxWidth: 7680, maxHeight: 1440, shortSide: 1440 },
   { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160, shortSide: 2160 },
