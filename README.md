@@ -52,7 +52,8 @@ The service does not need a public domain to poll Telegram. If you add one, the 
 - Accepts video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links to video files up to 4 GB.
 - If a link opens a web page instead of a video file, tries yt-dlp extraction for public pages on supported sites, including TikTok. Site coverage and availability vary; private, login-gated, and DRM-protected videos are not supported. The bot does not use sign-ins or saved browser cookies.
-- After the upload is prepared, asks the user to choose a preset from 240p, 360p, 480p, 720p, 1080p, 1440p, or 2160p / 4K, or enter a custom resolution.
+- Probes the video's real dimensions before showing choices. The menu includes the source size plus only presets that reduce that video's dimensions, with each button showing the resulting width × height; it never offers a higher-than-source preset. Custom targets that would not reduce the source are rejected.
+- Tries quality-first H.264 settings and only sends a result smaller than the source and within Telegram's delivery limit. If the source is already too compact to shrink at the chosen size, the bot asks for a lower resolution instead of returning a larger file.
 - Shows the original file size during compression, with progress and a countdown based on the encoder's measured speed.
 - Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit, keeping the source filename when available (`compressed-video.mp4` otherwise).
 - Sends each compressed video as a reply to the exact original upload or link message; includes the source URL in the caption when it fits.

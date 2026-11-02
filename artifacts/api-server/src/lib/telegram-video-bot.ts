@@ -32,6 +32,9 @@ import {
 } from "./tiktok-link-handler";
 import {
   compressVideo,
+  getAvailablePresetResolutions,
+  getOutputDimensions,
+  inspectVideoInfo,
   parseCustomResolution,
   VideoProcessingError,
   videoLimits,
@@ -126,8 +129,8 @@ type PendingVideo = {
   // get their deadline extended while a compression is active or queued.
   expiresAt: number;
   durationSeconds?: number;
-  sourceWidth?: number;
-  sourceHeight?: number;
+  sourceWidth: number;
+  sourceHeight: number;
   awaitingCustomResolution?: boolean;
 };
 
@@ -142,6 +145,7 @@ type PreparingVideo = {
   startedAt: number;
   cancelled: boolean;
   abortController?: AbortController;
+  child?: ChildProcess | null;
 };
 
 type QueueEntry = {
@@ -289,34 +293,71 @@ async function answerCallback(
   });
 }
 
-function resolutionKeyboard(): Record<string, unknown> {
+function resolutionKeyboard(
+  sourceWidth: number,
+  sourceHeight: number,
+): Record<string, unknown> {
+  const resolutions = [
+    {
+      text: `Keep ${sourceWidth}×${sourceHeight}`,
+      callback_data: "resolution:original",
+    },
+    ...getAvailablePresetResolutions(sourceWidth, sourceHeight).map(
+      (resolution) => {
+        const output = getOutputDimensions(
+          sourceWidth,
+          sourceHeight,
+          resolution,
+        );
+        return {
+          text: `${resolution.label} · ${output.width}×${output.height}`,
+          callback_data: `resolution:${resolution.label}`,
+        };
+      },
+    ),
+  ];
+  const rows = [];
+  for (let index = 0; index < resolutions.length; index += 2) {
+    rows.push(resolutions.slice(index, index + 2));
+  }
+  rows.push([
+    { text: "Custom size", callback_data: "resolution:custom" },
+    { text: "Cancel", callback_data: "resolution:cancel" },
+  ]);
   return {
-    inline_keyboard: [
-      [
-        { text: "240p", callback_data: "resolution:240p" },
-        { text: "360p", callback_data: "resolution:360p" },
-        { text: "480p", callback_data: "resolution:480p" },
-      ],
-      [
-        { text: "720p", callback_data: "resolution:720p" },
-        { text: "1080p", callback_data: "resolution:1080p" },
-      ],
-      [
-        { text: "1440p", callback_data: "resolution:1440p" },
-        { text: "2160p / 4K", callback_data: "resolution:2160p" },
-      ],
-      [
-        { text: "Custom size", callback_data: "resolution:custom" },
-        { text: "Cancel", callback_data: "resolution:cancel" },
-      ],
-    ],
+    inline_keyboard: rows,
   };
 }
 
-function findResolution(value: string): VideoResolution | null {
+function findResolution(
+  value: string,
+  pending: PendingVideo,
+): VideoResolution | null {
+  if (value === "original") {
+    return {
+      label: `Original ${pending.sourceWidth}×${pending.sourceHeight}`,
+      maxWidth: pending.sourceWidth,
+      maxHeight: pending.sourceHeight,
+    };
+  }
   return (
     PRESET_RESOLUTIONS.find((resolution) => resolution.label === value) ??
     parseCustomResolution(value)
+  );
+}
+
+function reducesSourceDimensions(
+  pending: PendingVideo,
+  resolution: VideoResolution,
+): boolean {
+  const output = getOutputDimensions(
+    pending.sourceWidth,
+    pending.sourceHeight,
+    resolution,
+  );
+  return (
+    output.width < pending.sourceWidth ||
+    output.height < pending.sourceHeight
   );
 }
 
@@ -478,6 +519,40 @@ async function prepareVideo(
     }
     preparation.fileSize = localFile.size;
 
+    await editMessage(
+      message.chat.id,
+      status.message_id,
+      `Video received (${formatBytes(localFile.size)}). Checking its actual resolution before showing compression choices.`,
+    ).catch(() => undefined);
+    let sourceInfo: VideoInfo;
+    try {
+      sourceInfo = await inspectVideoInfo(fetched.file_path, (child) => {
+        preparation.child = child;
+        if (preparation.cancelled && child) child.kill("SIGTERM");
+      });
+    } catch (error) {
+      await removeOwnedInput(fetched.file_path);
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        preparation.cancelled
+          ? "Upload preparation cancelled."
+          : error instanceof VideoProcessingError
+            ? error.message
+            : "This file does not contain a readable video stream.",
+      ).catch(() => undefined);
+      return;
+    }
+    if (preparation.cancelled) {
+      await removeOwnedInput(fetched.file_path);
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        "Upload preparation cancelled.",
+      ).catch(() => undefined);
+      return;
+    }
+
     const pending: PendingVideo = {
       id,
       key,
@@ -488,16 +563,16 @@ async function prepareVideo(
       filePath: fetched.file_path,
       statusMessageId: status.message_id,
       expiresAt: Date.now() + PENDING_TTL_MS,
-      durationSeconds: file.duration,
-      sourceWidth: file.width,
-      sourceHeight: file.height,
+      durationSeconds: sourceInfo.durationSeconds,
+      sourceWidth: sourceInfo.width,
+      sourceHeight: sourceInfo.height,
     };
     pendingVideos.set(id, pending);
     await editMessage(
       message.chat.id,
       status.message_id,
-      `Video ready (${formatBytes(localFile.size)}${file.duration != null ? ` · ${formatDuration(file.duration)}` : ""}). Choose an output resolution. I’ll show an estimated time once encoding begins. If another video is compressing, this one can wait in the queue.`,
-      resolutionKeyboard(),
+      `Video ready (${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}). Choose the original size or a smaller resolution; options larger than this video are hidden.`,
+      resolutionKeyboard(sourceInfo.width, sourceInfo.height),
     ).catch(async (error: unknown) => {
       logger.warn(
         { code: errorName(error) },
@@ -505,8 +580,8 @@ async function prepareVideo(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        "Your video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 240p, 720p, or 1280x720.",
-        resolutionKeyboard(),
+        `Your ${sourceInfo.width}×${sourceInfo.height} video is ready. Choose a size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
     });
@@ -638,6 +713,24 @@ async function prepareVideoFromUrl(
     }
 
     preparation.fileSize = localFile.size;
+    await editMessage(
+      message.chat.id,
+      status.message_id,
+      `Video downloaded (${formatBytes(localFile.size)}). Checking its actual resolution before showing compression choices.`,
+    ).catch(() => undefined);
+    const sourceInfo = await inspectVideoInfo(inputPath, (child) => {
+      preparation.child = child;
+      if (preparation.cancelled && child) child.kill("SIGTERM");
+    });
+    if (preparation.cancelled) {
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        "Video preparation cancelled.",
+      ).catch(() => undefined);
+      return;
+    }
+
     const parsedUrl = new URL(url);
     const fileName =
       source === "tiktok"
@@ -654,13 +747,16 @@ async function prepareVideoFromUrl(
       filePath: inputPath,
       statusMessageId: status.message_id,
       expiresAt: Date.now() + PENDING_TTL_MS,
+      durationSeconds: sourceInfo.durationSeconds,
+      sourceWidth: sourceInfo.width,
+      sourceHeight: sourceInfo.height,
     };
     pendingVideos.set(id, pending);
     await editMessage(
       message.chat.id,
       status.message_id,
-      `Video ready (original size: ${formatBytes(localFile.size)}). Choose an output resolution. I’ll show the encoding countdown once compression begins. If another video is compressing, this one can wait in the queue.`,
-      resolutionKeyboard(),
+      `Video ready (${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}). Choose the original size or a smaller resolution; options larger than this video are hidden.`,
+      resolutionKeyboard(sourceInfo.width, sourceInfo.height),
     ).catch(async (error: unknown) => {
       logger.warn(
         { code: errorName(error) },
@@ -668,8 +764,8 @@ async function prepareVideoFromUrl(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        "Your linked video is ready. Choose a resolution below; if the buttons do not appear, send a custom size such as 720p.",
-        resolutionKeyboard(),
+        `Your ${sourceInfo.width}×${sourceInfo.height} linked video is ready. Choose a size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
     });
@@ -692,9 +788,11 @@ async function prepareVideoFromUrl(
         ? source === "tiktok"
           ? tiktokFailureMessage(error)
           : publicVideoFailureMessage(error)
-        : error instanceof RemoteVideoDownloadError
-        ? error.message
-        : "I couldn’t download that video link. Check it and try again.";
+        : error instanceof VideoProcessingError
+          ? error.message
+          : error instanceof RemoteVideoDownloadError
+            ? error.message
+            : "I couldn’t download that video link. Check it and try again.";
     if (preparation.statusMessageId != null) {
       await editMessage(
         message.chat.id,
@@ -750,7 +848,7 @@ function describeCompressionStatus(job: ActiveJob): string {
     job.etaDeadlineAt == null
       ? "Measuring encoding speed; the countdown will appear shortly."
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
-  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/4 · ${percent}. ${eta} An extra pass may be needed to meet Telegram’s size limit.`;
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/6 · ${percent}. ${eta} Trying quality-first encoder settings while keeping the result smaller than the source.`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
@@ -808,7 +906,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
         "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
         "The extractor does not support every website, and some pages may block automated access.",
-        "Choose a preset from 240p to 2160p / 4K, or enter a custom size such as 720p or 1280x720.",
+        "Choose the original size or one of the smaller resolutions shown for your video. Higher-than-source options are hidden; you can also enter a custom size.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
@@ -921,6 +1019,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (preparation) {
         preparation.cancelled = true;
         preparation.abortController?.abort();
+        preparation.child?.kill("SIGTERM");
       }
       await removeOwnedInput(queued.pending.filePath);
       await editMessage(
@@ -937,6 +1036,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (pendingPreparation) {
         pendingPreparation.cancelled = true;
         pendingPreparation.abortController?.abort();
+        pendingPreparation.child?.kill("SIGTERM");
       }
       pendingVideos.delete(pending.id);
       await removeOwnedInput(pending.filePath);
@@ -952,6 +1052,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     if (preparation) {
       preparation.cancelled = true;
       preparation.abortController?.abort();
+      preparation.child?.kill("SIGTERM");
       if (preparation.statusMessageId != null) {
         await editMessage(
           preparation.chatId,
@@ -1023,7 +1124,14 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (!resolution) {
         await sendMessage(
           message.chat.id,
-          "Enter a size like 720p or 1280x720. Each dimension must be between 144 and 7680 pixels.",
+          "Enter a size like 360p or 640x360. Each dimension must be between 144 and 7680 pixels.",
+        );
+        return;
+      }
+      if (!reducesSourceDimensions(pending, resolution)) {
+        await sendMessage(
+          message.chat.id,
+          `That target would not reduce this ${pending.sourceWidth}×${pending.sourceHeight} video. Choose its original size or enter a smaller target.`,
         );
         return;
       }
@@ -1129,9 +1237,16 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     return;
   }
 
-  const resolution = findResolution(choice);
+  const resolution = findResolution(choice, pending);
   if (!resolution) {
     await answerCallback(callback.id, "That resolution is not available.");
+    return;
+  }
+  if (choice !== "original" && !reducesSourceDimensions(pending, resolution)) {
+    await answerCallback(
+      callback.id,
+      `Choose a resolution below ${pending.sourceWidth}×${pending.sourceHeight}.`,
+    );
     return;
   }
 
@@ -1157,7 +1272,7 @@ async function beginCompression(
         pending.chatId,
         pending.statusMessageId,
         "The compression queue is full. Your video is still ready; try again when a queued video finishes.",
-        resolutionKeyboard(),
+        resolutionKeyboard(pending.sourceWidth, pending.sourceHeight),
       ).catch(() => undefined);
       return;
     }
@@ -1596,6 +1711,7 @@ export function stopTelegramVideoBot(): void {
   for (const preparation of preparingVideos.values()) {
     preparation.cancelled = true;
     preparation.abortController?.abort();
+      preparation.child?.kill("SIGTERM");
   }
   for (const pending of pendingVideos.values()) {
     void removeOwnedInput(pending.filePath);
