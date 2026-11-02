@@ -9,16 +9,17 @@ export type VideoResolution = {
   label: string;
   maxWidth: number;
   maxHeight: number;
+  shortSide?: number;
 };
 
 export const PRESET_RESOLUTIONS: VideoResolution[] = [
-  { label: "240p", maxWidth: 7680, maxHeight: 240 },
-  { label: "360p", maxWidth: 7680, maxHeight: 360 },
-  { label: "480p", maxWidth: 7680, maxHeight: 480 },
-  { label: "720p", maxWidth: 7680, maxHeight: 720 },
-  { label: "1080p", maxWidth: 7680, maxHeight: 1080 },
-  { label: "1440p", maxWidth: 7680, maxHeight: 1440 },
-  { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160 },
+  { label: "240p", maxWidth: 7680, maxHeight: 240, shortSide: 240 },
+  { label: "360p", maxWidth: 7680, maxHeight: 360, shortSide: 360 },
+  { label: "480p", maxWidth: 7680, maxHeight: 480, shortSide: 480 },
+  { label: "720p", maxWidth: 7680, maxHeight: 720, shortSide: 720 },
+  { label: "1080p", maxWidth: 7680, maxHeight: 1080, shortSide: 1080 },
+  { label: "1440p", maxWidth: 7680, maxHeight: 1440, shortSide: 1440 },
+  { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160, shortSide: 2160 },
 ];
 
 export type VideoInfo = {
@@ -26,6 +27,8 @@ export type VideoInfo = {
   height: number;
   durationSeconds: number;
 };
+
+const COMPRESSION_CRF_LEVELS = [23, 26, 29, 32, 35, 38] as const;
 
 export type CompressionResult = {
   outputPath: string;
@@ -50,6 +53,7 @@ export class VideoProcessingError extends Error {
       | "invalid_video"
       | "input_too_large"
       | "output_too_large"
+      | "output_not_smaller"
       | "cancelled"
       | "processing_failed",
   ) {
@@ -147,7 +151,12 @@ export function parseCustomResolution(input: string): VideoResolution | null {
   if (preset) {
     const height = Number(preset[1]);
     if (height < 144 || height > 4320) return null;
-    return { label: `${height}p`, maxWidth: 7680, maxHeight: height };
+    return {
+      label: `${height}p`,
+      maxWidth: 7680,
+      maxHeight: height,
+      shortSide: height,
+    };
   }
 
   const dimensions = normalized.match(/^(\d{3,4})[x×](\d{3,4})$/);
@@ -218,20 +227,56 @@ async function probeVideo(
   }
 }
 
-function fitDimensions(
+export async function inspectVideoInfo(
+  inputPath: string,
+  onProcess: (child: ChildProcess | null) => void = () => undefined,
+): Promise<VideoInfo> {
+  try {
+    return await probeVideo(inputPath, (child) => onProcess(child));
+  } finally {
+    onProcess(null);
+  }
+}
+
+export function getOutputDimensions(
   sourceWidth: number,
   sourceHeight: number,
   resolution: VideoResolution,
 ): { width: number; height: number } {
-  const scale = Math.min(
-    1,
-    resolution.maxWidth / sourceWidth,
-    resolution.maxHeight / sourceHeight,
-  );
+  const scale =
+    resolution.shortSide == null
+      ? Math.min(
+          1,
+          resolution.maxWidth / sourceWidth,
+          resolution.maxHeight / sourceHeight,
+        )
+      : Math.min(
+          1,
+          resolution.shortSide / Math.min(sourceWidth, sourceHeight),
+        );
   return {
     width: Math.max(2, Math.floor((sourceWidth * scale) / 2) * 2),
     height: Math.max(2, Math.floor((sourceHeight * scale) / 2) * 2),
   };
+}
+
+export function getAvailablePresetResolutions(
+  sourceWidth: number,
+  sourceHeight: number,
+): VideoResolution[] {
+  if (
+    !Number.isFinite(sourceWidth) ||
+    !Number.isFinite(sourceHeight) ||
+    sourceWidth < 2 ||
+    sourceHeight < 2
+  ) {
+    return [];
+  }
+
+  return PRESET_RESOLUTIONS.filter((resolution) => {
+    const output = getOutputDimensions(sourceWidth, sourceHeight, resolution);
+    return output.width < sourceWidth || output.height < sourceHeight;
+  });
 }
 
 export async function compressVideo(options: {
@@ -264,20 +309,23 @@ export async function compressVideo(options: {
     );
   }
 
-  const info = await probeVideo(inputPath, (child) => options.onProcess(child)).finally(
-    () => options.onProcess(null),
-  );
+  const info = await inspectVideoInfo(inputPath, options.onProcess);
   options.onVideoInfo(info);
-  const dimensions = fitDimensions(info.width, info.height, options.resolution);
+  const dimensions = getOutputDimensions(
+    info.width,
+    info.height,
+    options.resolution,
+  );
   const scaleFilter = `scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
-  const crfLevels = [27, 31, 35, 38];
   let outputBytes = 0;
-  let succeeded = false;
 
   try {
-    for (let attempt = 0; attempt < crfLevels.length; attempt += 1) {
-      const crf = crfLevels[attempt];
-      if (crf == null) continue;
+    for (
+      let attempt = 0;
+      attempt < COMPRESSION_CRF_LEVELS.length;
+      attempt += 1
+    ) {
+      const crf = COMPRESSION_CRF_LEVELS[attempt];
       await unlink(options.outputPath).catch(() => undefined);
 
       await runProcess(
@@ -299,7 +347,7 @@ export async function compressVideo(options: {
           "-c:v",
           "libx264",
           "-preset",
-          "fast",
+          "slow",
           "-crf",
           String(crf),
           "-threads",
@@ -324,7 +372,7 @@ export async function compressVideo(options: {
           const attemptProgress = Math.min(1, seconds / info.durationSeconds);
           options.onProgress({
             attempt: attempt + 1,
-            totalAttempts: crfLevels.length,
+            totalAttempts: COMPRESSION_CRF_LEVELS.length,
             fraction: attemptProgress,
             videoSeconds: Math.min(info.durationSeconds, Math.max(0, seconds)),
             durationSeconds: info.durationSeconds,
@@ -333,13 +381,21 @@ export async function compressVideo(options: {
       );
 
       outputBytes = (await stat(options.outputPath)).size;
-      if (outputBytes <= MAX_TELEGRAM_OUTPUT_BYTES) {
-        succeeded = true;
+      if (
+        outputBytes < input.size &&
+        outputBytes <= MAX_TELEGRAM_OUTPUT_BYTES
+      ) {
         break;
       }
     }
 
-    if (!succeeded) {
+    if (outputBytes >= input.size) {
+      throw new VideoProcessingError(
+        "This video is already very compact. Keeping its current resolution would make the result larger; choose a lower resolution to reduce its size.",
+        "output_not_smaller",
+      );
+    }
+    if (outputBytes > MAX_TELEGRAM_OUTPUT_BYTES) {
       throw new VideoProcessingError(
         "The compressed video is still too large to send through Telegram. Try a lower resolution.",
         "output_too_large",
