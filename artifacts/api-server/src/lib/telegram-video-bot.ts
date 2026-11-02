@@ -16,6 +16,7 @@ import {
   MAX_WAITING_COMPRESSIONS,
 } from "./video-queue-limits";
 import { parseRestartNotificationChatId } from "./restart-notification";
+import { buildRailwayDeploymentChecklist } from "./railway-deployment-checklist";
 import {
   downloadRemoteVideo,
   findHttpUrl,
@@ -815,6 +816,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
         "Use /chatid in a private chat to get its ID for restart notifications.",
+        "Use /railwayvars in a private chat for a safe deployment checklist; secret values are never sent.",
       ].join("\n"),
     );
     return;
@@ -826,6 +828,36 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       message.chat.type === "private"
         ? `Private chat ID: ${message.chat.id}\nSet this as TELEGRAM_RESTART_NOTIFICATION_CHAT_ID in Railway.`
         : "For privacy, send /chatid in a private chat with this bot.",
+    );
+    return;
+  }
+
+  if (text === "/railwayvars" || text?.startsWith("/railwayvars@")) {
+    if (message.chat.type !== "private") {
+      await sendMessage(
+        message.chat.id,
+        "For privacy, run /railwayvars in a private chat with this bot.",
+      );
+      return;
+    }
+
+    const configuredOwnerChatId = parseRestartNotificationChatId(
+      process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
+    );
+    if (
+      configuredOwnerChatId != null &&
+      message.chat.id !== configuredOwnerChatId
+    ) {
+      await sendMessage(
+        message.chat.id,
+        "This deployment checklist is available only in the configured private chat.",
+      );
+      return;
+    }
+
+    await sendMessage(
+      message.chat.id,
+      buildRailwayDeploymentChecklist(process.env),
     );
     return;
   }
@@ -1505,6 +1537,10 @@ export async function startTelegramVideoBot(): Promise<() => void> {
         { command: "start", description: "Start the video compressor" },
         { command: "help", description: "Show usage instructions" },
         { command: "chatid", description: "Show this private chat's ID" },
+        {
+          command: "railwayvars",
+          description: "Show a safe Railway variables checklist",
+        },
         { command: "status", description: "Check active and queued videos" },
         { command: "cancel", description: "Cancel the next waiting video" },
       ],
