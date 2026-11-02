@@ -16,7 +16,10 @@ import {
   MAX_WAITING_COMPRESSIONS,
 } from "./video-queue-limits";
 import { parseRestartNotificationChatId } from "./restart-notification";
-import { buildRailwayDeploymentChecklist } from "./railway-deployment-checklist";
+import {
+  buildRailwayDeploymentChecklist,
+  isAuthorizedRailwayVarsChat,
+} from "./railway-deployment-checklist";
 import {
   downloadRemoteVideo,
   findHttpUrl,
@@ -914,7 +917,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
         "Use /chatid in a private chat to get its ID for restart notifications.",
-        "Use /railwayvars in a private chat for a safe deployment checklist; secret values are never sent.",
+        "Use /railwayvars in your configured private chat to see runtime settings; credential values are never sent.",
       ].join("\n"),
     );
     return;
@@ -931,25 +934,22 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   }
 
   if (text === "/railwayvars" || text?.startsWith("/railwayvars@")) {
-    if (message.chat.type !== "private") {
-      await sendMessage(
-        message.chat.id,
-        "For privacy, run /railwayvars in a private chat with this bot.",
-      );
-      return;
-    }
-
-    const configuredOwnerChatId = parseRestartNotificationChatId(
-      process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
-    );
+    const configuredOwnerChatId =
+      process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"];
     if (
-      configuredOwnerChatId != null &&
-      message.chat.id !== configuredOwnerChatId
-    ) {
-      await sendMessage(
+      !isAuthorizedRailwayVarsChat(
+        message.chat.type,
         message.chat.id,
-        "This deployment checklist is available only in the configured private chat.",
-      );
+        configuredOwnerChatId,
+      )
+    ) {
+      const denial =
+        message.chat.type !== "private"
+          ? "For privacy, /railwayvars is available only in your configured private chat."
+          : parseRestartNotificationChatId(configuredOwnerChatId) == null
+            ? "For privacy, /railwayvars is locked until TELEGRAM_RESTART_NOTIFICATION_CHAT_ID is set. Send /chatid in your private chat, set that value in Railway, then restart the bot."
+            : "For privacy, /railwayvars is available only in the configured private chat.";
+      await sendMessage(message.chat.id, denial);
       return;
     }
 
@@ -1654,7 +1654,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
         { command: "chatid", description: "Show this private chat's ID" },
         {
           command: "railwayvars",
-          description: "Show a safe Railway variables checklist",
+          description: "Show private runtime configuration",
         },
         { command: "status", description: "Check active and queued videos" },
         { command: "cancel", description: "Cancel the next waiting video" },

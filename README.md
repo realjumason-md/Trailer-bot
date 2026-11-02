@@ -43,7 +43,7 @@ Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot 
 4. Set the Railway healthcheck path to `/api/healthz` and keep the service to one replica. This bot uses long polling and keeps its current job in process memory.
 5. If this bot is being moved from Telegram's hosted Bot API for the first time, call `logOut` once before starting this service. Do not call it on routine restarts or redeploys.
 
-In a private chat, `/railwayvars` sends a copyable deployment checklist and whether required variables are configured, without revealing secret values. If `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` is set, only that private chat can use the command. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
+In the configured private chat, `/railwayvars` shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by `/chatid`; the command is disabled until that ID is valid and only that private chat can use it. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
 
