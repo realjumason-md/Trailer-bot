@@ -38,6 +38,7 @@ import {
   getAvailablePresetResolutions,
   getOutputDimensions,
   inspectVideoInfo,
+  isRetryableResolutionError,
   parseCustomResolution,
   VideoProcessingError,
   videoLimits,
@@ -299,26 +300,21 @@ async function answerCallback(
 function resolutionKeyboard(
   sourceWidth: number,
   sourceHeight: number,
+  excludedResolution?: string,
 ): Record<string, unknown> {
-  const resolutions = [
-    {
-      text: `Keep ${sourceWidth}×${sourceHeight}`,
-      callback_data: "resolution:original",
-    },
-    ...getAvailablePresetResolutions(sourceWidth, sourceHeight).map(
-      (resolution) => {
-        const output = getOutputDimensions(
-          sourceWidth,
-          sourceHeight,
-          resolution,
-        );
-        return {
-          text: `${resolution.label} · ${output.width}×${output.height}`,
-          callback_data: `resolution:${resolution.label}`,
-        };
-      },
-    ),
-  ];
+  const resolutions = getAvailablePresetResolutions(sourceWidth, sourceHeight)
+    .filter((resolution) => resolution.label !== excludedResolution)
+    .map((resolution) => {
+      const output = getOutputDimensions(
+        sourceWidth,
+        sourceHeight,
+        resolution,
+      );
+      return {
+        text: `${resolution.label} · ${output.width}×${output.height}`,
+        callback_data: `resolution:${resolution.label}`,
+      };
+    });
   const rows = [];
   for (let index = 0; index < resolutions.length; index += 2) {
     rows.push(resolutions.slice(index, index + 2));
@@ -332,17 +328,7 @@ function resolutionKeyboard(
   };
 }
 
-function findResolution(
-  value: string,
-  pending: PendingVideo,
-): VideoResolution | null {
-  if (value === "original") {
-    return {
-      label: `Original ${pending.sourceWidth}×${pending.sourceHeight}`,
-      maxWidth: pending.sourceWidth,
-      maxHeight: pending.sourceHeight,
-    };
-  }
+function findResolution(value: string): VideoResolution | null {
   return (
     PRESET_RESOLUTIONS.find((resolution) => resolution.label === value) ??
     parseCustomResolution(value)
@@ -574,7 +560,7 @@ async function prepareVideo(
     await editMessage(
       message.chat.id,
       status.message_id,
-      `Video ready (${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}). Choose the original size or a smaller resolution; options larger than this video are hidden.`,
+      `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose a smaller output resolution; options larger than the source are hidden.`,
       resolutionKeyboard(sourceInfo.width, sourceInfo.height),
     ).catch(async (error: unknown) => {
       logger.warn(
@@ -583,7 +569,7 @@ async function prepareVideo(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your ${sourceInfo.width}×${sourceInfo.height} video is ready. Choose a size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose a smaller output size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -758,7 +744,7 @@ async function prepareVideoFromUrl(
     await editMessage(
       message.chat.id,
       status.message_id,
-      `Video ready (${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}). Choose the original size or a smaller resolution; options larger than this video are hidden.`,
+      `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose a smaller output resolution; options larger than the source are hidden.`,
       resolutionKeyboard(sourceInfo.width, sourceInfo.height),
     ).catch(async (error: unknown) => {
       logger.warn(
@@ -767,7 +753,7 @@ async function prepareVideoFromUrl(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your ${sourceInfo.width}×${sourceInfo.height} linked video is ready. Choose a size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        `Your linked video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose a smaller output size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -851,7 +837,7 @@ function describeCompressionStatus(job: ActiveJob): string {
     job.etaDeadlineAt == null
       ? "Measuring encoding speed; the countdown will appear shortly."
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
-  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/6 · ${percent}. ${eta} Trying quality-first encoder settings while keeping the result smaller than the source.`;
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/1 · ${percent}. ${eta} Encoding once at high quality; I won’t silently lower quality to force a smaller file.`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
@@ -909,7 +895,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
         "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
         "The extractor does not support every website, and some pages may block automated access.",
-        "Choose the original size or one of the smaller resolutions shown for your video. Higher-than-source options are hidden; you can also enter a custom size.",
+        "The bot shows the original dimensions, then offers only smaller output resolutions. You can also enter a custom size.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
@@ -1237,12 +1223,12 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     return;
   }
 
-  const resolution = findResolution(choice, pending);
+  const resolution = findResolution(choice);
   if (!resolution) {
     await answerCallback(callback.id, "That resolution is not available.");
     return;
   }
-  if (choice !== "original" && !reducesSourceDimensions(pending, resolution)) {
+  if (!reducesSourceDimensions(pending, resolution)) {
     await answerCallback(
       callback.id,
       `Choose a resolution below ${pending.sourceWidth}×${pending.sourceHeight}.`,
@@ -1321,6 +1307,7 @@ async function runCompressionJob(
   resolution: VideoResolution,
 ): Promise<void> {
   let inputPath: string | null = null;
+  let retainInputForRetry = false;
   const outputDirectory = path.join(JOBS_DIR, randomUUID());
   const outputPath = path.join(
     outputDirectory,
@@ -1442,23 +1429,55 @@ async function runCompressionJob(
       `Done. The compressed video has been sent. Original: ${formatBytes(pending.fileSize)} · outcome: ${formatBytes(result.outputBytes)}.`,
     ).catch(() => undefined);
   } catch (error) {
-    const userMessage =
-      error instanceof VideoProcessingError
-        ? error.message
-        : "The video could not be processed. Please try again.";
     logger.warn(
       { code: errorName(error), chatId: job.chatId },
       "Video compression job failed",
     );
-    await editMessage(
-      pending.chatId,
-      pending.statusMessageId,
-      job.cancelled ? "Compression cancelled." : userMessage,
-    ).catch(() => undefined);
+    if (!job.cancelled && isRetryableResolutionError(error)) {
+      pending.awaitingCustomResolution = false;
+      pending.expiresAt = Date.now() + PENDING_TTL_MS;
+      pendingVideos.set(pending.id, pending);
+      retainInputForRetry = true;
+
+      const message =
+        error.code === "output_not_smaller"
+          ? `That target couldn’t make this already-compact video smaller without sacrificing more quality. Original: ${pending.sourceWidth}×${pending.sourceHeight}. Choose a lower resolution or custom size to try again.`
+          : `That output is still above Telegram’s size limit. Original: ${pending.sourceWidth}×${pending.sourceHeight}. Choose a lower resolution or custom size to try again.`;
+      const keyboard = resolutionKeyboard(
+        pending.sourceWidth,
+        pending.sourceHeight,
+        resolution.label,
+      );
+      try {
+        await editMessage(
+          pending.chatId,
+          pending.statusMessageId,
+          message,
+          keyboard,
+        );
+      } catch {
+        const fallback = await sendMessage(
+          pending.chatId,
+          message,
+          keyboard,
+        ).catch(() => undefined);
+        if (fallback) pending.statusMessageId = fallback.message_id;
+      }
+    } else {
+      const userMessage =
+        error instanceof VideoProcessingError
+          ? error.message
+          : "The video could not be processed. Please try again.";
+      await editMessage(
+        pending.chatId,
+        pending.statusMessageId,
+        job.cancelled ? "Compression cancelled." : userMessage,
+      ).catch(() => undefined);
+    }
   } finally {
     await unlink(outputPath).catch(() => undefined);
     await rmdir(outputDirectory).catch(() => undefined);
-    if (inputPath) await removeOwnedInput(inputPath);
+    if (inputPath && !retainInputForRetry) await removeOwnedInput(inputPath);
     if (activeJob === job) {
       activeJob = null;
       startNextQueuedCompression();

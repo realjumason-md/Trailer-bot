@@ -15,6 +15,7 @@ export type VideoResolution = {
 export const PRESET_RESOLUTIONS: VideoResolution[] = [
   { label: "240p", maxWidth: 7680, maxHeight: 240, shortSide: 240 },
   { label: "360p", maxWidth: 7680, maxHeight: 360, shortSide: 360 },
+  { label: "420p", maxWidth: 7680, maxHeight: 420, shortSide: 420 },
   { label: "480p", maxWidth: 7680, maxHeight: 480, shortSide: 480 },
   { label: "720p", maxWidth: 7680, maxHeight: 720, shortSide: 720 },
   { label: "1080p", maxWidth: 7680, maxHeight: 1080, shortSide: 1080 },
@@ -28,7 +29,7 @@ export type VideoInfo = {
   durationSeconds: number;
 };
 
-const COMPRESSION_CRF_LEVELS = [23, 26, 29, 32, 35, 38] as const;
+const COMPRESSION_CRF_LEVELS = [18] as const;
 
 export type CompressionResult = {
   outputPath: string;
@@ -60,6 +61,15 @@ export class VideoProcessingError extends Error {
     super(message);
     this.name = "VideoProcessingError";
   }
+}
+
+export function isRetryableResolutionError(
+  error: unknown,
+): error is VideoProcessingError {
+  return (
+    error instanceof VideoProcessingError &&
+    (error.code === "output_not_smaller" || error.code === "output_too_large")
+  );
 }
 
 type ProcessResult = {

@@ -3,8 +3,10 @@ import test from "node:test";
 import {
   getAvailablePresetResolutions,
   getOutputDimensions,
+  isRetryableResolutionError,
   PRESET_RESOLUTIONS,
   parseCustomResolution,
+  VideoProcessingError,
 } from "./video-processing.ts";
 
 const presetByLabel = new Map(
@@ -14,9 +16,10 @@ const presetByLabel = new Map(
 test("offers 240p and 360p as selectable preset resolutions", () => {
   assert.equal(presetByLabel.get("240p")?.maxHeight, 240);
   assert.equal(presetByLabel.get("360p")?.maxHeight, 360);
+  assert.equal(presetByLabel.get("420p")?.maxHeight, 420);
 });
 
-test("accepts 240p and 360p as custom resolution inputs too", () => {
+test("accepts 240p, 360p, and 420p as custom resolution inputs too", () => {
   assert.deepEqual(parseCustomResolution("240p"), {
     label: "240p",
     maxWidth: 7680,
@@ -29,24 +32,30 @@ test("accepts 240p and 360p as custom resolution inputs too", () => {
     maxHeight: 360,
     shortSide: 360,
   });
+  assert.deepEqual(parseCustomResolution("420p"), {
+    label: "420p",
+    maxWidth: 7680,
+    maxHeight: 420,
+    shortSide: 420,
+  });
 });
 
 test("only offers preset resolutions that reduce the source dimensions", () => {
   assert.deepEqual(
     getAvailablePresetResolutions(1280, 720).map(({ label }) => label),
-    ["240p", "360p", "480p"],
+    ["240p", "360p", "420p", "480p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1920, 1080).map(({ label }) => label),
-    ["240p", "360p", "480p", "720p"],
+    ["240p", "360p", "420p", "480p", "720p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(3840, 2160).map(({ label }) => label),
-    ["240p", "360p", "480p", "720p", "1080p", "1440p"],
+    ["240p", "360p", "420p", "480p", "720p", "1080p", "1440p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1080, 1920).map(({ label }) => label),
-    ["240p", "360p", "480p", "720p"],
+    ["240p", "360p", "420p", "480p", "720p"],
   );
 });
 
@@ -60,7 +69,38 @@ test("fits portrait presets by short edge without upscaling", () => {
   assert.equal(output.height, 1280);
 });
 
+test("maps 420p to the correct landscape output dimensions", () => {
+  const preset = PRESET_RESOLUTIONS.find(({ label }) => label === "420p");
+  assert.ok(preset);
+  assert.deepEqual(getOutputDimensions(1280, 720, preset), {
+    width: 746,
+    height: 420,
+  });
+});
+
 test("returns no standard downscale presets for invalid or tiny sources", () => {
   assert.deepEqual(getAvailablePresetResolutions(0, 0), []);
   assert.deepEqual(getAvailablePresetResolutions(320, 240), []);
+});
+
+test("offers a fresh choice after output-size errors, not processing failures", () => {
+  assert.equal(
+    isRetryableResolutionError(
+      new VideoProcessingError("Too compact", "output_not_smaller"),
+    ),
+    true,
+  );
+  assert.equal(
+    isRetryableResolutionError(
+      new VideoProcessingError("Too large", "output_too_large"),
+    ),
+    true,
+  );
+  assert.equal(
+    isRetryableResolutionError(
+      new VideoProcessingError("Invalid", "invalid_video"),
+    ),
+    false,
+  );
+  assert.equal(isRetryableResolutionError(new Error("Unknown")), false);
 });
