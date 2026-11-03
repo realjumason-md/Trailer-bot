@@ -304,17 +304,10 @@ function resolutionKeyboard(
 ): Record<string, unknown> {
   const resolutions = getAvailablePresetResolutions(sourceWidth, sourceHeight)
     .filter((resolution) => resolution.label !== excludedResolution)
-    .map((resolution) => {
-      const output = getOutputDimensions(
-        sourceWidth,
-        sourceHeight,
-        resolution,
-      );
-      return {
-        text: `${resolution.label} · ${output.width}×${output.height}`,
-        callback_data: `resolution:${resolution.label}`,
-      };
-    });
+    .map((resolution) => ({
+      text: resolution.label,
+      callback_data: `resolution:${resolution.label}`,
+    }));
   const rows = [];
   for (let index = 0; index < resolutions.length; index += 2) {
     rows.push(resolutions.slice(index, index + 2));
