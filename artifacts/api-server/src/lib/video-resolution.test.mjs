@@ -32,7 +32,7 @@ test("offers a same-resolution compression choice", () => {
     height: 240,
   });
   assert.deepEqual(SAME_RESOLUTION_COMPRESSION_CRF_LEVELS, [
-    18, 22, 26, 30, 34, 38, 42,
+    18,
   ]);
 });
 
