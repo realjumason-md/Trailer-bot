@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   getAvailablePresetResolutions,
   getOutputDimensions,
+  getSameResolutionResolution,
   getSmallerPresetResolutions,
   isRetryableResolutionError,
   PRESET_RESOLUTIONS,
+  SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
   parseCustomResolution,
   VideoProcessingError,
 } from "./video-processing.ts";
@@ -19,6 +21,19 @@ test("offers 240p and 360p as selectable preset resolutions", () => {
   assert.equal(presetByLabel.get("360p")?.maxHeight, 360);
   assert.equal(presetByLabel.get("420p")?.maxHeight, 420);
   assert.equal(presetByLabel.get("960p")?.maxHeight, 960);
+});
+
+test("offers a same-resolution compression choice", () => {
+  const resolution = getSameResolutionResolution(426, 240);
+  assert.equal(resolution.label, "Same resolution");
+  assert.equal(resolution.preserveSourceDimensions, true);
+  assert.deepEqual(getOutputDimensions(426, 240, resolution), {
+    width: 426,
+    height: 240,
+  });
+  assert.deepEqual(SAME_RESOLUTION_COMPRESSION_CRF_LEVELS, [
+    18, 22, 26, 30, 34, 38, 42,
+  ]);
 });
 
 test("accepts arbitrary custom p targets", () => {
