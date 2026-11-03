@@ -46,7 +46,7 @@ export type VideoInfo = {
 };
 
 export const COMPRESSION_CRF_LEVELS = [18] as const;
-export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = [18, 22, 26, 30, 34, 38, 42] as const;
+export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = [18] as const;
 
 export type CompressionResult = {
   outputPath: string;
@@ -370,6 +370,9 @@ export async function compressVideo(options: {
   const crfLevels: readonly number[] = options.resolution.preserveSourceDimensions
     ? SAME_RESOLUTION_COMPRESSION_CRF_LEVELS
     : COMPRESSION_CRF_LEVELS;
+  const audioCodecArgs = options.resolution.preserveSourceDimensions
+    ? ["-c:a", "copy"]
+    : ["-c:a", "aac", "-b:a", "128k", "-ac", "2"];
   let outputBytes = 0;
 
   try {
@@ -407,12 +410,7 @@ export async function compressVideo(options: {
           "2",
           "-pix_fmt",
           "yuv420p",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-ac",
-          "2",
+          ...audioCodecArgs,
           "-movflags",
           "+faststart",
           "-progress",
