@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   getAvailablePresetResolutions,
   getOutputDimensions,
+  getSmallerPresetResolutions,
   isRetryableResolutionError,
   PRESET_RESOLUTIONS,
   parseCustomResolution,
@@ -51,6 +52,19 @@ test("only offers preset resolutions that reduce the source dimensions", () => {
   assert.deepEqual(
     getAvailablePresetResolutions(1080, 1920).map(({ label }) => label),
     ["240p", "360p", "420p", "480p", "720p", "960p"],
+  );
+});
+
+test("finds only presets smaller than the failed resolution", () => {
+  assert.deepEqual(
+    getSmallerPresetResolutions(1280, 720, presetByLabel.get("420p")).map(
+      ({ label }) => label,
+    ),
+    ["240p", "360p"],
+  );
+  assert.deepEqual(
+    getSmallerPresetResolutions(1280, 720, presetByLabel.get("240p")),
+    [],
   );
 });
 
