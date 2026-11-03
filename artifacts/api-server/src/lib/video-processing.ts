@@ -290,6 +290,29 @@ export function getAvailablePresetResolutions(
   });
 }
 
+export function getSmallerPresetResolutions(
+  sourceWidth: number,
+  sourceHeight: number,
+  target: VideoResolution,
+): VideoResolution[] {
+  const targetDimensions = getOutputDimensions(
+    sourceWidth,
+    sourceHeight,
+    target,
+  );
+  return getAvailablePresetResolutions(sourceWidth, sourceHeight).filter(
+    (resolution) => {
+      const output = getOutputDimensions(sourceWidth, sourceHeight, resolution);
+      return (
+        output.width <= targetDimensions.width &&
+        output.height <= targetDimensions.height &&
+        (output.width < targetDimensions.width ||
+          output.height < targetDimensions.height)
+      );
+    },
+  );
+}
+
 export async function compressVideo(options: {
   inputPath: string;
   outputPath: string;
