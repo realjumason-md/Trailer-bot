@@ -866,7 +866,7 @@ function describeCompressionStatus(job: ActiveJob): string {
     job.etaDeadlineAt == null
       ? "Measuring encoding speed; the countdown will appear shortly."
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
-  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta} Progress reports each encoding pass; same-resolution compression increases only when needed to make the output smaller.`;
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta} Same-resolution mode uses one high-quality video pass and preserves the source audio stream.`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
