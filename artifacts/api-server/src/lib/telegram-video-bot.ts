@@ -35,9 +35,13 @@ import {
 } from "./tiktok-link-handler";
 import {
   compressVideo,
+  COMPRESSION_CRF_LEVELS,
   getAvailablePresetResolutions,
   getOutputDimensions,
+  getSameResolutionResolution,
   getSmallerPresetResolutions,
+  SAME_RESOLUTION_CHOICE,
+  SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
   inspectVideoInfo,
   isRetryableResolutionError,
   parseCustomResolution,
@@ -168,6 +172,7 @@ type ActiveJob = {
   sourceBytes: number;
   statusText: string;
   attempt: number;
+  totalAttempts: number;
   progressPercent: number;
   etaDeadlineAt: number | null;
   attemptStartedAt: number;
@@ -288,72 +293,6 @@ async function editMessage(
   });
 }
 
-async function sendOriginalUncompressedVideo(
-  pending: PendingVideo,
-): Promise<void> {
-  const sourceNote = pending.sourceUrl
-    ? pending.sourceUrl.length <= 3_000
-      ? ` Source link: ${pending.sourceUrl}`
-      : " The source link is in your original message."
-    : " The original remains in your earlier message.";
-  const sourceFile = await stat(pending.filePath).catch(() => null);
-  if (!sourceFile?.isFile()) {
-    await editMessage(
-      pending.chatId,
-      pending.statusMessageId,
-      `No smaller resolution is available, but I couldn't access the original file to resend it.${sourceNote}`,
-    ).catch(() => undefined);
-    return;
-  }
-
-  if (sourceFile.size > videoLimits.maxTelegramOutputBytes) {
-    await editMessage(
-      pending.chatId,
-      pending.statusMessageId,
-      `No smaller resolution is available, and the original (${formatBytes(sourceFile.size)}) exceeds this bot's 1.9 GB Telegram send limit. I can't resend it uncompressed.${sourceNote}`,
-    ).catch(() => undefined);
-    return;
-  }
-
-  await editMessage(
-    pending.chatId,
-    pending.statusMessageId,
-    `No smaller resolution is available. Sending the original uncompressed video (${formatBytes(sourceFile.size)}).`,
-  ).catch(() => undefined);
-
-  try {
-    await telegramCall(
-      "sendDocument",
-      {
-        chat_id: pending.chatId,
-        document: pathToFileURL(pending.filePath).href,
-        reply_to_message_id: pending.sourceMessageId,
-        allow_sending_without_reply: true,
-        caption: buildCompressionResultCaption(
-          `Original uncompressed video · ${pending.sourceWidth}×${pending.sourceHeight} · ${formatBytes(sourceFile.size)}`,
-          pending.sourceUrl,
-        ),
-      },
-      6 * 60 * 60 * 1000,
-    );
-    await editMessage(
-      pending.chatId,
-      pending.statusMessageId,
-      `Done. Sent the original uncompressed video (${formatBytes(sourceFile.size)}).`,
-    ).catch(() => undefined);
-  } catch (error) {
-    logger.warn(
-      { code: errorName(error), chatId: pending.chatId },
-      "Could not send the original uncompressed video",
-    );
-    await editMessage(
-      pending.chatId,
-      pending.statusMessageId,
-      `Telegram couldn't resend the original uncompressed video.${sourceNote}`,
-    ).catch(() => undefined);
-  }
-}
-
 async function answerCallback(
   callbackId: string,
   text?: string,
@@ -373,12 +312,22 @@ function resolutionKeyboard(
   const availableResolutions = smallerThan
     ? getSmallerPresetResolutions(sourceWidth, sourceHeight, smallerThan)
     : getAvailablePresetResolutions(sourceWidth, sourceHeight);
-  const resolutions = availableResolutions
-    .filter((resolution) => resolution.label !== excludedResolution)
-    .map((resolution) => ({
-      text: resolution.label,
-      callback_data: `resolution:${resolution.label}`,
-    }));
+  const resolutions = [
+    ...(smallerThan
+      ? []
+      : [
+          {
+            text: "Same resolution",
+            callback_data: `resolution:${SAME_RESOLUTION_CHOICE}`,
+          },
+        ]),
+    ...availableResolutions
+      .filter((resolution) => resolution.label !== excludedResolution)
+      .map((resolution) => ({
+        text: resolution.label,
+        callback_data: `resolution:${resolution.label}`,
+      })),
+  ];
   const rows = [];
   for (let index = 0; index < resolutions.length; index += 2) {
     rows.push(resolutions.slice(index, index + 2));
@@ -624,19 +573,11 @@ async function prepareVideo(
       sourceInfo.width,
       sourceInfo.height,
     );
-    if (
-      presetChoices.length === 0 &&
-      localFile.size <= videoLimits.maxTelegramOutputBytes
-    ) {
-      await sendOriginalUncompressedVideo(pending);
-      await removeOwnedInput(fetched.file_path);
-      return;
-    }
     pendingVideos.set(id, pending);
     const readyMessage =
       presetChoices.length === 0
-        ? `No smaller preset is available for ${sourceInfo.width}×${sourceInfo.height}. The original (${formatBytes(localFile.size)}) exceeds Telegram's 1.9 GB send limit, so choose Custom size to try a smaller file.`
-        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose a smaller output resolution; options larger than the source are hidden.`;
+        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Same resolution to compress without downscaling, or Custom size to reduce dimensions.`
+        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Same resolution to compress without downscaling or a lower output resolution. Custom size is also available.`;
     await editMessage(
       message.chat.id,
       status.message_id,
@@ -649,7 +590,7 @@ async function prepareVideo(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose a smaller output size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Same resolution to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -824,18 +765,11 @@ async function prepareVideoFromUrl(
       sourceInfo.width,
       sourceInfo.height,
     );
-    if (
-      presetChoices.length === 0 &&
-      localFile.size <= videoLimits.maxTelegramOutputBytes
-    ) {
-      await sendOriginalUncompressedVideo(pending);
-      return;
-    }
     pendingVideos.set(id, pending);
     const readyMessage =
       presetChoices.length === 0
-        ? `No smaller preset is available for ${sourceInfo.width}×${sourceInfo.height}. The original (${formatBytes(localFile.size)}) exceeds Telegram's 1.9 GB send limit, so choose Custom size to try a smaller file.`
-        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose a smaller output resolution; options larger than the source are hidden.`;
+        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Same resolution to compress without downscaling, or Custom size to reduce dimensions.`
+        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Same resolution to compress without downscaling or a lower output resolution. Custom size is also available.`;
     await editMessage(
       message.chat.id,
       status.message_id,
@@ -848,7 +782,7 @@ async function prepareVideoFromUrl(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your linked video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose a smaller output size below; if the buttons do not appear, send a smaller custom size such as 360p or 640x360.`,
+        `Your linked video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Same resolution to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -932,7 +866,7 @@ function describeCompressionStatus(job: ActiveJob): string {
     job.etaDeadlineAt == null
       ? "Measuring encoding speed; the countdown will appear shortly."
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
-  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/1 · ${percent}. ${eta} Encoding once at high quality; I won’t silently lower quality to force a smaller file.`;
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta} Progress reports each encoding pass; same-resolution compression increases only when needed to make the output smaller.`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
@@ -990,7 +924,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
         "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
         "The extractor does not support every website, and some pages may block automated access.",
-        "The bot shows the original dimensions, then offers only smaller output resolutions. You can also enter a custom size.",
+        "The bot shows the original dimensions, then offers same-resolution compression and lower output sizes. Same-resolution results are sent only when they are smaller than the source.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
@@ -1212,7 +1146,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (!reducesSourceDimensions(pending, resolution)) {
         await sendMessage(
           message.chat.id,
-          `That target would not reduce this ${pending.sourceWidth}×${pending.sourceHeight} video. Choose its original size or enter a smaller target.`,
+          `That target would not reduce this ${pending.sourceWidth}×${pending.sourceHeight} video. Choose Same resolution to compress without downscaling, or enter a smaller target.`,
         );
         return;
       }
@@ -1311,19 +1245,28 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
       `Enter a target below ${pending.sourceWidth}×${pending.sourceHeight}, using NNNp or widthxheight format (for example, 960p or 1280x720). The aspect ratio is preserved; upscaling is rejected.`,
       {
         inline_keyboard: [
-          [{ text: "Cancel", callback_data: "resolution:cancel" }],
+          [
+            { text: "Same resolution", callback_data: "resolution:same" },
+            { text: "Cancel", callback_data: "resolution:cancel" },
+          ],
         ],
       },
     );
     return;
   }
 
-  const resolution = findResolution(choice);
+  const resolution =
+    choice === SAME_RESOLUTION_CHOICE
+      ? getSameResolutionResolution(pending.sourceWidth, pending.sourceHeight)
+      : findResolution(choice);
   if (!resolution) {
     await answerCallback(callback.id, "That resolution is not available.");
     return;
   }
-  if (!reducesSourceDimensions(pending, resolution)) {
+  if (
+    choice !== SAME_RESOLUTION_CHOICE &&
+    !reducesSourceDimensions(pending, resolution)
+  ) {
     await answerCallback(
       callback.id,
       `Choose a resolution below ${pending.sourceWidth}×${pending.sourceHeight}.`,
@@ -1375,6 +1318,9 @@ async function beginCompression(
     sourceBytes: pending.fileSize,
     statusText: `Starting ${resolution.label} compression. Original size: ${formatBytes(pending.fileSize)}. Measuring encoding speed for the countdown.`,
     attempt: 1,
+    totalAttempts: resolution.preserveSourceDimensions
+      ? SAME_RESOLUTION_COMPRESSION_CRF_LEVELS.length
+      : COMPRESSION_CRF_LEVELS.length,
     progressPercent: 0,
     etaDeadlineAt: null,
     attemptStartedAt: Date.now(),
@@ -1534,50 +1480,42 @@ async function runCompressionJob(
         pending.sourceHeight,
         resolution,
       );
-      if (
-        error.code === "output_not_smaller" &&
-        smallerPresets.length === 0 &&
-        pending.fileSize <= videoLimits.maxTelegramOutputBytes
-      ) {
-        await sendOriginalUncompressedVideo(pending);
-      } else {
-        pending.awaitingCustomResolution = false;
-        pending.expiresAt = Date.now() + PENDING_TTL_MS;
-        pendingVideos.set(pending.id, pending);
-        retainInputForRetry = true;
+      pending.awaitingCustomResolution = false;
+      pending.expiresAt = Date.now() + PENDING_TTL_MS;
+      pendingVideos.set(pending.id, pending);
+      retainInputForRetry = true;
 
-        const sourceNote = pending.sourceUrl
-          ? pending.sourceUrl.length <= 3_000
-            ? ` Source link: ${pending.sourceUrl}`
-            : " The source link is in your original message."
-          : " The original remains in your earlier message.";
-        const message =
-          error.code === "output_not_smaller"
-            ? smallerPresets.length === 0
-              ? `No smaller preset remains, and the original (${formatBytes(pending.fileSize)}) exceeds Telegram's 1.9 GB send limit. Try a smaller custom size.${sourceNote}`
-              : `That target couldn't make this video smaller at high quality. Choose one of the lower resolutions or enter a custom size.`
-            : `That output is still above Telegram's size limit. Choose a lower resolution or custom size to try again.${smallerPresets.length === 0 ? sourceNote : ""}`;
-        const keyboard = resolutionKeyboard(
-          pending.sourceWidth,
-          pending.sourceHeight,
-          resolution.label,
-          resolution,
+      const sourceNote = pending.sourceUrl
+        ? pending.sourceUrl.length <= 3_000
+          ? ` Source link: ${pending.sourceUrl}`
+          : " The source link is in your original message."
+        : " The original remains in your earlier message.";
+      const message =
+        error.code === "output_not_smaller"
+          ? smallerPresets.length === 0
+            ? `No smaller file could be made at ${resolution.label}. Try a custom size below ${pending.sourceWidth}×${pending.sourceHeight}.${sourceNote}`
+            : `That target couldn't make this video smaller at high quality. Choose one of the lower resolutions or enter a custom size.`
+          : `That output is still above Telegram's size limit. Choose a lower resolution or custom size to try again.${smallerPresets.length === 0 ? sourceNote : ""}`;
+      const keyboard = resolutionKeyboard(
+        pending.sourceWidth,
+        pending.sourceHeight,
+        resolution.label,
+        resolution,
+      );
+      try {
+        await editMessage(
+          pending.chatId,
+          pending.statusMessageId,
+          message,
+          keyboard,
         );
-        try {
-          await editMessage(
-            pending.chatId,
-            pending.statusMessageId,
-            message,
-            keyboard,
-          );
-        } catch {
-          const fallback = await sendMessage(
-            pending.chatId,
-            message,
-            keyboard,
-          ).catch(() => undefined);
-          if (fallback) pending.statusMessageId = fallback.message_id;
-        }
+      } catch {
+        const fallback = await sendMessage(
+          pending.chatId,
+          message,
+          keyboard,
+        ).catch(() => undefined);
+        if (fallback) pending.statusMessageId = fallback.message_id;
       }
     } else {
       const userMessage =
