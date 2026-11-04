@@ -10,7 +10,22 @@ export type VideoResolution = {
   maxWidth: number;
   maxHeight: number;
   shortSide?: number;
+  preserveSourceDimensions?: boolean;
 };
+
+export const SAME_RESOLUTION_CHOICE = "same";
+
+export function getSameResolutionResolution(
+  sourceWidth: number,
+  sourceHeight: number,
+): VideoResolution {
+  return {
+    label: "Same resolution",
+    maxWidth: sourceWidth,
+    maxHeight: sourceHeight,
+    preserveSourceDimensions: true,
+  };
+}
 
 export const PRESET_RESOLUTIONS: VideoResolution[] = [
   { label: "240p", maxWidth: 7680, maxHeight: 240, shortSide: 240 },
@@ -30,7 +45,27 @@ export type VideoInfo = {
   durationSeconds: number;
 };
 
-const COMPRESSION_CRF_LEVELS = [18] as const;
+export const COMPRESSION_CRF_LEVELS = [18] as const;
+export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = [18] as const;
+
+const MIN_ETA_PROGRESS_FRACTION = 0.05;
+const MIN_ETA_ELAPSED_SECONDS = 60;
+
+export function estimateRemainingSeconds(
+  progressFraction: number,
+  elapsedSeconds: number,
+): number | null {
+  if (
+    !Number.isFinite(progressFraction) ||
+    !Number.isFinite(elapsedSeconds) ||
+    progressFraction < MIN_ETA_PROGRESS_FRACTION ||
+    progressFraction > 1 ||
+    elapsedSeconds < MIN_ETA_ELAPSED_SECONDS
+  ) {
+    return null;
+  }
+  return Math.max(0, Math.ceil(elapsedSeconds * ((1 - progressFraction) / progressFraction)));
+}
 
 export type CompressionResult = {
   outputPath: string;
@@ -351,15 +386,21 @@ export async function compressVideo(options: {
     options.resolution,
   );
   const scaleFilter = `scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
+  const crfLevels: readonly number[] = options.resolution.preserveSourceDimensions
+    ? SAME_RESOLUTION_COMPRESSION_CRF_LEVELS
+    : COMPRESSION_CRF_LEVELS;
+  const audioCodecArgs = options.resolution.preserveSourceDimensions
+    ? ["-c:a", "copy"]
+    : ["-c:a", "aac", "-b:a", "128k", "-ac", "2"];
   let outputBytes = 0;
 
   try {
     for (
       let attempt = 0;
-      attempt < COMPRESSION_CRF_LEVELS.length;
+      attempt < crfLevels.length;
       attempt += 1
     ) {
-      const crf = COMPRESSION_CRF_LEVELS[attempt];
+      const crf = crfLevels[attempt];
       await unlink(options.outputPath).catch(() => undefined);
 
       await runProcess(
@@ -388,12 +429,7 @@ export async function compressVideo(options: {
           "2",
           "-pix_fmt",
           "yuv420p",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-ac",
-          "2",
+          ...audioCodecArgs,
           "-movflags",
           "+faststart",
           "-progress",
@@ -406,7 +442,7 @@ export async function compressVideo(options: {
           const attemptProgress = Math.min(1, seconds / info.durationSeconds);
           options.onProgress({
             attempt: attempt + 1,
-            totalAttempts: COMPRESSION_CRF_LEVELS.length,
+            totalAttempts: crfLevels.length,
             fraction: attemptProgress,
             videoSeconds: Math.min(info.durationSeconds, Math.max(0, seconds)),
             durationSeconds: info.durationSeconds,
@@ -425,7 +461,7 @@ export async function compressVideo(options: {
 
     if (outputBytes >= input.size) {
       throw new VideoProcessingError(
-        "This video is already very compact. Keeping its current resolution would make the result larger; choose a lower resolution to reduce its size.",
+        "No smaller compressed file was found at this size. Try a lower resolution or custom size.",
         "output_not_smaller",
       );
     }
