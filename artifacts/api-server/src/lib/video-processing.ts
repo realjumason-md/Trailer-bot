@@ -48,6 +48,25 @@ export type VideoInfo = {
 export const COMPRESSION_CRF_LEVELS = [18] as const;
 export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = [18] as const;
 
+const MIN_ETA_PROGRESS_FRACTION = 0.05;
+const MIN_ETA_ELAPSED_SECONDS = 60;
+
+export function estimateRemainingSeconds(
+  progressFraction: number,
+  elapsedSeconds: number,
+): number | null {
+  if (
+    !Number.isFinite(progressFraction) ||
+    !Number.isFinite(elapsedSeconds) ||
+    progressFraction < MIN_ETA_PROGRESS_FRACTION ||
+    progressFraction > 1 ||
+    elapsedSeconds < MIN_ETA_ELAPSED_SECONDS
+  ) {
+    return null;
+  }
+  return Math.max(0, Math.ceil(elapsedSeconds * ((1 - progressFraction) / progressFraction)));
+}
+
 export type CompressionResult = {
   outputPath: string;
   width: number;
