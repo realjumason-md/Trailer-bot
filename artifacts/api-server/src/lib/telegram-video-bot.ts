@@ -36,6 +36,7 @@ import {
 import {
   compressVideo,
   COMPRESSION_CRF_LEVELS,
+  estimateRemainingSeconds,
   getAvailablePresetResolutions,
   getOutputDimensions,
   getSameResolutionResolution,
@@ -189,6 +190,7 @@ const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
 const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
+const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 
 let botToken = "";
 let stopping = false;
@@ -438,7 +440,7 @@ async function prepareVideo(
           telegramCall<{ file_path?: string }>(
             "getFile",
             { file_id: file.file_id },
-            6 * 60 * 60 * 1000,
+            LONG_TELEGRAM_FILE_TIMEOUT_MS,
           ),
         {
           maxAttempts: 3,
@@ -864,9 +866,13 @@ function describeCompressionStatus(job: ActiveJob): string {
   const percent = `${job.progressPercent}%`;
   const eta =
     job.etaDeadlineAt == null
-      ? "Measuring encoding speed; the countdown will appear shortly."
+      ? "Measuring encoding speed; the estimate appears after 5% progress and at least 1 minute."
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
-  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta} Same-resolution mode uses one high-quality video pass and preserves the source audio stream.`;
+  const sameResolutionNote =
+    job.resolution === "Same resolution"
+      ? " Same-resolution mode uses one high-quality video pass and preserves the source audio stream."
+      : "";
+  return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta}${sameResolutionNote}`;
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
@@ -1388,7 +1394,7 @@ async function runCompressionJob(
         job.attemptStartedAt = Date.now();
         job.progressPercent = 0;
         job.etaDeadlineAt = null;
-        job.statusText = `Original size ${formatBytes(job.sourceBytes)} · compressing ${resolution.label} for a ${formatDuration(info.durationSeconds)} video. Measuring encoding speed; the countdown will appear shortly.`;
+        job.statusText = `Original size ${formatBytes(job.sourceBytes)} · compressing ${resolution.label} for a ${formatDuration(info.durationSeconds)} video. Measuring encoding speed; the estimate appears after 5% progress and at least 1 minute.`;
         void editMessage(
           pending.chatId,
           pending.statusMessageId,
@@ -1411,14 +1417,12 @@ async function runCompressionJob(
         }
         job.progressPercent = Math.min(99, Math.floor(progress.fraction * 100));
         const attemptElapsedSeconds = (now - job.attemptStartedAt) / 1_000;
-        if (progress.fraction >= 0.005 && attemptElapsedSeconds >= 10) {
-          const remainingSeconds = Math.max(
-            0,
-            attemptElapsedSeconds *
-              ((1 - progress.fraction) / progress.fraction),
-          );
-          job.etaDeadlineAt = now + remainingSeconds * 1_000;
-        }
+        const remainingSeconds = estimateRemainingSeconds(
+          progress.fraction,
+          attemptElapsedSeconds,
+        );
+        job.etaDeadlineAt =
+          remainingSeconds == null ? null : now + remainingSeconds * 1_000;
         job.statusText = describeCompressionStatus(job);
         if (
           job.progressPercent >= lastUpdatePercent + 10 ||
@@ -1461,7 +1465,7 @@ async function runCompressionJob(
         ),
         supports_streaming: true,
       },
-      6 * 60 * 60 * 1000,
+      LONG_TELEGRAM_FILE_TIMEOUT_MS,
     );
 
     await editMessage(
