@@ -18,7 +18,7 @@ const POST_HOSTS = new Set([
 const SHORT_LINK_HOSTS = new Set(["vm.tiktok.com", "vt.tiktok.com"]);
 const MAX_STDERR_CHARS = 4_000;
 const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1_000;
-const SITE_DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+const SITE_DOWNLOAD_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 const SUPPORTED_VIDEO_EXTENSION =
   /\.(?:mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|3gp|ts|flv)$/iu;
 
