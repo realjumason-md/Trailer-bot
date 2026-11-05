@@ -28,15 +28,17 @@ export function getSameResolutionResolution(
 }
 
 export const PRESET_RESOLUTIONS: VideoResolution[] = [
-  { label: "240p", maxWidth: 7680, maxHeight: 240, shortSide: 240 },
-  { label: "360p", maxWidth: 7680, maxHeight: 360, shortSide: 360 },
-  { label: "420p", maxWidth: 7680, maxHeight: 420, shortSide: 420 },
-  { label: "480p", maxWidth: 7680, maxHeight: 480, shortSide: 480 },
-  { label: "720p", maxWidth: 7680, maxHeight: 720, shortSide: 720 },
-  { label: "960p", maxWidth: 7680, maxHeight: 960, shortSide: 960 },
-  { label: "1080p", maxWidth: 7680, maxHeight: 1080, shortSide: 1080 },
-  { label: "1440p", maxWidth: 7680, maxHeight: 1440, shortSide: 1440 },
   { label: "2160p / 4K", maxWidth: 7680, maxHeight: 2160, shortSide: 2160 },
+  { label: "1440p", maxWidth: 7680, maxHeight: 1440, shortSide: 1440 },
+  { label: "1080p", maxWidth: 7680, maxHeight: 1080, shortSide: 1080 },
+  { label: "960p", maxWidth: 7680, maxHeight: 960, shortSide: 960 },
+  { label: "720p", maxWidth: 7680, maxHeight: 720, shortSide: 720 },
+  { label: "640p", maxWidth: 7680, maxHeight: 640, shortSide: 640 },
+  { label: "480p", maxWidth: 7680, maxHeight: 480, shortSide: 480 },
+  { label: "360p", maxWidth: 7680, maxHeight: 360, shortSide: 360 },
+  { label: "320p", maxWidth: 7680, maxHeight: 320, shortSide: 320 },
+  { label: "240p", maxWidth: 7680, maxHeight: 240, shortSide: 240 },
+  { label: "144p", maxWidth: 7680, maxHeight: 144, shortSide: 144 },
 ];
 
 export type VideoInfo = {
@@ -45,8 +47,8 @@ export type VideoInfo = {
   durationSeconds: number;
 };
 
-export const COMPRESSION_CRF_LEVELS = [18] as const;
-export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = [18] as const;
+export const COMPRESSION_CRF_LEVELS = [23, 26, 29, 32, 35, 38] as const;
+export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = COMPRESSION_CRF_LEVELS;
 
 const MIN_ETA_PROGRESS_FRACTION = 0.05;
 const MIN_ETA_ELAPSED_SECONDS = 60;
@@ -64,7 +66,10 @@ export function estimateRemainingSeconds(
   ) {
     return null;
   }
-  return Math.max(0, Math.ceil(elapsedSeconds * ((1 - progressFraction) / progressFraction)));
+  return Math.max(
+    0,
+    Math.ceil(elapsedSeconds * ((1 - progressFraction) / progressFraction)),
+  );
 }
 
 export type CompressionResult = {
@@ -172,7 +177,9 @@ function runProcess(
         return;
       }
       if (signal === "SIGTERM" || signal === "SIGINT") {
-        reject(new VideoProcessingError("Compression was cancelled.", "cancelled"));
+        reject(
+          new VideoProcessingError("Compression was cancelled.", "cancelled"),
+        );
         return;
       }
 
@@ -210,12 +217,7 @@ export function parseCustomResolution(input: string): VideoResolution | null {
 
   const width = Number(dimensions[1]);
   const height = Number(dimensions[2]);
-  if (
-    width < 144 ||
-    height < 144 ||
-    width > 7680 ||
-    height > 7680
-  ) {
+  if (width < 144 || height < 144 || width > 7680 || height > 7680) {
     return null;
   }
   return {
@@ -296,10 +298,7 @@ export function getOutputDimensions(
           resolution.maxWidth / sourceWidth,
           resolution.maxHeight / sourceHeight,
         )
-      : Math.min(
-          1,
-          resolution.shortSide / Math.min(sourceWidth, sourceHeight),
-        );
+      : Math.min(1, resolution.shortSide / Math.min(sourceWidth, sourceHeight));
   return {
     width: Math.max(2, Math.floor((sourceWidth * scale) / 2) * 2),
     height: Math.max(2, Math.floor((sourceHeight * scale) / 2) * 2),
@@ -386,7 +385,8 @@ export async function compressVideo(options: {
     options.resolution,
   );
   const scaleFilter = `scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
-  const crfLevels: readonly number[] = options.resolution.preserveSourceDimensions
+  const crfLevels: readonly number[] = options.resolution
+    .preserveSourceDimensions
     ? SAME_RESOLUTION_COMPRESSION_CRF_LEVELS
     : COMPRESSION_CRF_LEVELS;
   const audioCodecArgs = options.resolution.preserveSourceDimensions
@@ -395,11 +395,7 @@ export async function compressVideo(options: {
   let outputBytes = 0;
 
   try {
-    for (
-      let attempt = 0;
-      attempt < crfLevels.length;
-      attempt += 1
-    ) {
+    for (let attempt = 0; attempt < crfLevels.length; attempt += 1) {
       const crf = crfLevels[attempt];
       await unlink(options.outputPath).catch(() => undefined);
 
@@ -473,9 +469,8 @@ export async function compressVideo(options: {
     }
 
     // Telegram may not infer metadata from local file:// uploads; probe the finished MP4.
-    const outputInfo = await probeVideo(
-      options.outputPath,
-      (child) => options.onProcess(child),
+    const outputInfo = await probeVideo(options.outputPath, (child) =>
+      options.onProcess(child),
     );
 
     return {

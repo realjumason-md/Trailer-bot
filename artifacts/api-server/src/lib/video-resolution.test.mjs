@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  COMPRESSION_CRF_LEVELS,
   getAvailablePresetResolutions,
   getOutputDimensions,
   getSameResolutionResolution,
@@ -16,11 +17,15 @@ const presetByLabel = new Map(
   PRESET_RESOLUTIONS.map((resolution) => [resolution.label, resolution]),
 );
 
-test("offers 240p and 360p as selectable preset resolutions", () => {
+test("offers the converter-style standard resolution presets", () => {
+  assert.equal(presetByLabel.get("144p")?.maxHeight, 144);
   assert.equal(presetByLabel.get("240p")?.maxHeight, 240);
+  assert.equal(presetByLabel.get("320p")?.maxHeight, 320);
   assert.equal(presetByLabel.get("360p")?.maxHeight, 360);
-  assert.equal(presetByLabel.get("420p")?.maxHeight, 420);
+  assert.equal(presetByLabel.get("480p")?.maxHeight, 480);
+  assert.equal(presetByLabel.get("640p")?.maxHeight, 640);
   assert.equal(presetByLabel.get("960p")?.maxHeight, 960);
+  assert.equal(presetByLabel.has("420p"), false);
 });
 
 test("offers a same-resolution compression choice", () => {
@@ -31,9 +36,11 @@ test("offers a same-resolution compression choice", () => {
     width: 426,
     height: 240,
   });
-  assert.deepEqual(SAME_RESOLUTION_COMPRESSION_CRF_LEVELS, [
-    18,
-  ]);
+  assert.deepEqual(COMPRESSION_CRF_LEVELS, [23, 26, 29, 32, 35, 38]);
+  assert.deepEqual(
+    SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
+    [23, 26, 29, 32, 35, 38],
+  );
 });
 
 test("accepts arbitrary custom p targets", () => {
@@ -51,34 +58,49 @@ test("accepts arbitrary custom p targets", () => {
   });
 });
 
-test("only offers preset resolutions that reduce the source dimensions", () => {
+test("only offers downscale presets, ordered from highest to lowest", () => {
   assert.deepEqual(
     getAvailablePresetResolutions(1280, 720).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p"],
+    ["640p", "480p", "360p", "320p", "240p", "144p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1920, 1080).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p", "960p"],
+    ["960p", "720p", "640p", "480p", "360p", "320p", "240p", "144p"],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(3840, 2160).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p", "960p", "1080p", "1440p"],
+    [
+      "1440p",
+      "1080p",
+      "960p",
+      "720p",
+      "640p",
+      "480p",
+      "360p",
+      "320p",
+      "240p",
+      "144p",
+    ],
   );
   assert.deepEqual(
     getAvailablePresetResolutions(1080, 1920).map(({ label }) => label),
-    ["240p", "360p", "420p", "480p", "720p", "960p"],
+    ["960p", "720p", "640p", "480p", "360p", "320p", "240p", "144p"],
+  );
+  assert.deepEqual(
+    getAvailablePresetResolutions(1728, 720).map(({ label }) => label),
+    ["640p", "480p", "360p", "320p", "240p", "144p"],
   );
 });
 
 test("finds only presets smaller than the failed resolution", () => {
   assert.deepEqual(
-    getSmallerPresetResolutions(1280, 720, presetByLabel.get("420p")).map(
+    getSmallerPresetResolutions(1280, 720, presetByLabel.get("480p")).map(
       ({ label }) => label,
     ),
-    ["240p", "360p"],
+    ["360p", "320p", "240p", "144p"],
   );
   assert.deepEqual(
-    getSmallerPresetResolutions(1280, 720, presetByLabel.get("240p")),
+    getSmallerPresetResolutions(1280, 720, presetByLabel.get("144p")),
     [],
   );
 });
@@ -93,12 +115,12 @@ test("fits portrait presets by short edge without upscaling", () => {
   assert.equal(output.height, 1280);
 });
 
-test("maps 420p to the correct landscape output dimensions", () => {
-  const preset = PRESET_RESOLUTIONS.find(({ label }) => label === "420p");
+test("maps 640p to the correct landscape output dimensions", () => {
+  const preset = PRESET_RESOLUTIONS.find(({ label }) => label === "640p");
   assert.ok(preset);
   assert.deepEqual(getOutputDimensions(1280, 720, preset), {
-    width: 746,
-    height: 420,
+    width: 1136,
+    height: 640,
   });
 });
 
@@ -113,7 +135,7 @@ test("maps 960p to the correct 4K landscape output dimensions", () => {
 
 test("returns no standard downscale presets for invalid or tiny sources", () => {
   assert.deepEqual(getAvailablePresetResolutions(0, 0), []);
-  assert.deepEqual(getAvailablePresetResolutions(320, 240), []);
+  assert.deepEqual(getAvailablePresetResolutions(144, 144), []);
 });
 
 test("offers a fresh choice after output-size errors, not processing failures", () => {

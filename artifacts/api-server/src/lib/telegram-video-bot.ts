@@ -319,7 +319,7 @@ function resolutionKeyboard(
       ? []
       : [
           {
-            text: "Same resolution",
+            text: `Original ${sourceWidth}×${sourceHeight}`,
             callback_data: `resolution:${SAME_RESOLUTION_CHOICE}`,
           },
         ]),
@@ -330,16 +330,12 @@ function resolutionKeyboard(
         callback_data: `resolution:${resolution.label}`,
       })),
   ];
-  const rows = [];
-  for (let index = 0; index < resolutions.length; index += 2) {
-    rows.push(resolutions.slice(index, index + 2));
-  }
-  rows.push([
-    { text: "Custom size", callback_data: "resolution:custom" },
-    { text: "Cancel", callback_data: "resolution:cancel" },
-  ]);
   return {
-    inline_keyboard: rows,
+    inline_keyboard: [
+      ...resolutions.map((resolution) => [resolution]),
+      [{ text: "Custom resolution", callback_data: "resolution:custom" }],
+      [{ text: "Cancel", callback_data: "resolution:cancel" }],
+    ],
   };
 }
 
@@ -360,8 +356,7 @@ function reducesSourceDimensions(
     resolution,
   );
   return (
-    output.width < pending.sourceWidth ||
-    output.height < pending.sourceHeight
+    output.width < pending.sourceWidth || output.height < pending.sourceHeight
   );
 }
 
@@ -578,8 +573,8 @@ async function prepareVideo(
     pendingVideos.set(id, pending);
     const readyMessage =
       presetChoices.length === 0
-        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Same resolution to compress without downscaling, or Custom size to reduce dimensions.`
-        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Same resolution to compress without downscaling or a lower output resolution. Custom size is also available.`;
+        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling, or Custom resolution to reduce dimensions.`
+        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or a lower output resolution. Custom resolution is also available.`;
     await editMessage(
       message.chat.id,
       status.message_id,
@@ -592,7 +587,7 @@ async function prepareVideo(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Same resolution to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
+        `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -652,28 +647,26 @@ async function prepareVideoFromUrl(
       downloadedBytes: number,
       totalBytes?: number,
     ): void => {
-        preparation.fileSize = downloadedBytes;
-        const now = Date.now();
-        const percent =
-          totalBytes && totalBytes > 0
-            ? Math.floor((downloadedBytes / totalBytes) * 100)
-            : null;
-        if (
-          now - lastProgressAt >= 15_000 ||
-          (percent != null && percent >= lastProgressPercent + 10)
-        ) {
-          lastProgressAt = now;
-          if (percent != null) lastProgressPercent = percent;
-          const progressLabel =
-            percent == null
-              ? formatBytes(downloadedBytes)
-              : `${percent}%`;
-          void editMessage(
-            message.chat.id,
-            status.message_id,
-            `${source === "tiktok" ? "Fetching TikTok video" : "Downloading video"}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
-          ).catch(() => undefined);
-        }
+      preparation.fileSize = downloadedBytes;
+      const now = Date.now();
+      const percent =
+        totalBytes && totalBytes > 0
+          ? Math.floor((downloadedBytes / totalBytes) * 100)
+          : null;
+      if (
+        now - lastProgressAt >= 15_000 ||
+        (percent != null && percent >= lastProgressPercent + 10)
+      ) {
+        lastProgressAt = now;
+        if (percent != null) lastProgressPercent = percent;
+        const progressLabel =
+          percent == null ? formatBytes(downloadedBytes) : `${percent}%`;
+        void editMessage(
+          message.chat.id,
+          status.message_id,
+          `${source === "tiktok" ? "Fetching TikTok video" : "Downloading video"}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
+        ).catch(() => undefined);
+      }
     };
     const downloadedBytes =
       source === "tiktok"
@@ -770,8 +763,8 @@ async function prepareVideoFromUrl(
     pendingVideos.set(id, pending);
     const readyMessage =
       presetChoices.length === 0
-        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Same resolution to compress without downscaling, or Custom size to reduce dimensions.`
-        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Same resolution to compress without downscaling or a lower output resolution. Custom size is also available.`;
+        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling, or Custom resolution to reduce dimensions.`
+        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or a lower output resolution. Custom resolution is also available.`;
     await editMessage(
       message.chat.id,
       status.message_id,
@@ -784,7 +777,7 @@ async function prepareVideoFromUrl(
       );
       const fallback = await sendMessage(
         message.chat.id,
-        `Your linked video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Same resolution to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
+        `Your linked video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
       ).catch(() => undefined);
       if (fallback) pending.statusMessageId = fallback.message_id;
@@ -984,19 +977,16 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   if (text?.startsWith("/status")) {
     const key = userId == null ? "" : makeSessionKey(message.chat.id, userId);
     const queued = key
-      ? compressionQueue
-          .toArray()
-          .filter((entry) => entry.pending.key === key)
+      ? compressionQueue.toArray().filter((entry) => entry.pending.key === key)
       : [];
     const prepared = key ? pendingForSession(key) : [];
     const preparing = key ? preparationsForSession(key) : [];
     if (activeJob?.key === key) {
       const waiting =
-        queued.length > 0 ? ` You also have ${queued.length} video(s) queued.` : "";
-      await sendMessage(
-        message.chat.id,
-        `${activeJob.statusText}${waiting}`,
-      );
+        queued.length > 0
+          ? ` You also have ${queued.length} video(s) queued.`
+          : "";
+      await sendMessage(message.chat.id, `${activeJob.statusText}${waiting}`);
     } else if (queued.length > 0) {
       await sendMessage(
         message.chat.id,
@@ -1048,7 +1038,10 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         queued.pending.statusMessageId,
         "Queued video cancelled.",
       ).catch(() => undefined);
-      await sendMessage(message.chat.id, "Your next queued video was cancelled.");
+      await sendMessage(
+        message.chat.id,
+        "Your next queued video was cancelled.",
+      );
       return;
     }
     const pending = key ? pendingForSession(key)[0] : undefined;
@@ -1106,16 +1099,17 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   const tiktokUrl = text ? findTikTokUrl(text) : null;
   if (tiktokUrl) {
-    void prepareVideoFromUrl(message, tiktokUrl, "tiktok").catch((error: unknown) => {
-      logger.warn(
-        { code: errorName(error), updateType: "tiktok_url" },
-        "Could not prepare a TikTok link",
-      );
-      void sendMessage(
-        message.chat.id,
-        tiktokFailureMessage(error),
-      ).catch(() => undefined);
-    });
+    void prepareVideoFromUrl(message, tiktokUrl, "tiktok").catch(
+      (error: unknown) => {
+        logger.warn(
+          { code: errorName(error), updateType: "tiktok_url" },
+          "Could not prepare a TikTok link",
+        );
+        void sendMessage(message.chat.id, tiktokFailureMessage(error)).catch(
+          () => undefined,
+        );
+      },
+    );
     return;
   }
 
@@ -1152,7 +1146,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (!reducesSourceDimensions(pending, resolution)) {
         await sendMessage(
           message.chat.id,
-          `That target would not reduce this ${pending.sourceWidth}×${pending.sourceHeight} video. Choose Same resolution to compress without downscaling, or enter a smaller target.`,
+          `That target would not reduce this ${pending.sourceWidth}×${pending.sourceHeight} video. Choose Original ${pending.sourceWidth}×${pending.sourceHeight} to compress without downscaling, or enter a smaller target.`,
         );
         return;
       }
@@ -1163,7 +1157,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     if (ready.length > 1 && parseCustomResolution(text)) {
       void sendMessage(
         message.chat.id,
-        "Choose Custom size on the message for the video you want to compress, then send the target size.",
+        "Choose Custom resolution on the message for the video you want to compress, then send the target size.",
       );
       return;
     }
@@ -1252,7 +1246,10 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
       {
         inline_keyboard: [
           [
-            { text: "Same resolution", callback_data: "resolution:same" },
+            {
+              text: `Original ${pending.sourceWidth}×${pending.sourceHeight}`,
+              callback_data: "resolution:same",
+            },
             { text: "Cancel", callback_data: "resolution:cancel" },
           ],
         ],
@@ -1788,7 +1785,7 @@ export function stopTelegramVideoBot(): void {
   for (const preparation of preparingVideos.values()) {
     preparation.cancelled = true;
     preparation.abortController?.abort();
-      preparation.child?.kill("SIGTERM");
+    preparation.child?.kill("SIGTERM");
   }
   for (const pending of pendingVideos.values()) {
     void removeOwnedInput(pending.filePath);
