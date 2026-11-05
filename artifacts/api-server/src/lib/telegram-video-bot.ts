@@ -863,7 +863,7 @@ function describeCompressionStatus(job: ActiveJob): string {
       : `Estimated time remaining ${formatCountdown((job.etaDeadlineAt - Date.now()) / 1_000)}.`;
   const sameResolutionNote =
     job.resolution === "Same resolution"
-      ? " Same-resolution mode uses one high-quality video pass and preserves the source audio stream."
+      ? " Same-resolution mode keeps the original dimensions and copies the source audio stream."
       : "";
   return `Original size ${formatBytes(job.sourceBytes)} · compressing to ${job.resolution} · pass ${job.attempt}/${job.totalAttempts} · ${percent}. ${eta}${sameResolutionNote}`;
 }
