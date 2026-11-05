@@ -9,6 +9,7 @@ import {
   isRetryableResolutionError,
   PRESET_RESOLUTIONS,
   SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
+  VIDEO_ENCODING_PRESET,
   parseCustomResolution,
   VideoProcessingError,
 } from "./video-processing.ts";
@@ -36,11 +37,9 @@ test("offers a same-resolution compression choice", () => {
     width: 426,
     height: 240,
   });
-  assert.deepEqual(COMPRESSION_CRF_LEVELS, [23, 26, 29, 32, 35, 38]);
-  assert.deepEqual(
-    SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
-    [23, 26, 29, 32, 35, 38],
-  );
+  assert.deepEqual(COMPRESSION_CRF_LEVELS, [27, 31, 35, 38]);
+  assert.deepEqual(SAME_RESOLUTION_COMPRESSION_CRF_LEVELS, [27, 31, 35, 38]);
+  assert.equal(VIDEO_ENCODING_PRESET, "fast");
 });
 
 test("accepts arbitrary custom p targets", () => {

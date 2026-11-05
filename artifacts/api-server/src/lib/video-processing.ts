@@ -47,8 +47,9 @@ export type VideoInfo = {
   durationSeconds: number;
 };
 
-export const COMPRESSION_CRF_LEVELS = [23, 26, 29, 32, 35, 38] as const;
+export const COMPRESSION_CRF_LEVELS = [27, 31, 35, 38] as const;
 export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = COMPRESSION_CRF_LEVELS;
+export const VIDEO_ENCODING_PRESET = "fast" as const;
 
 const MIN_ETA_PROGRESS_FRACTION = 0.05;
 const MIN_ETA_ELAPSED_SECONDS = 60;
@@ -418,7 +419,7 @@ export async function compressVideo(options: {
           "-c:v",
           "libx264",
           "-preset",
-          "slow",
+          VIDEO_ENCODING_PRESET,
           "-crf",
           String(crf),
           "-threads",
