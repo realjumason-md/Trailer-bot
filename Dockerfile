@@ -18,6 +18,7 @@ FROM node:24-alpine AS runtime
 
 ENV NODE_ENV=production
 ENV BOT_DATA_DIR=/data/telegram-video-bot
+ENV YTDLP_AUTO_UPDATE=true
 
 RUN apk add --no-cache \
     ca-certificates \
@@ -25,7 +26,11 @@ RUN apk add --no-cache \
     su-exec \
     libstdc++ \
     openssl \
-    yt-dlp \
+    python3 \
+    py3-pip \
+  && python3 -m venv /opt/yt-dlp \
+  && /opt/yt-dlp/bin/pip install --disable-pip-version-check --no-cache-dir --timeout 20 --retries 1 yt-dlp \
+  && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp \
   && yt-dlp --version
 
 # Copy the compatible binary
@@ -34,16 +39,7 @@ COPY --from=telegram-api /usr/local/bin/telegram-bot-api /usr/local/bin/telegram
 WORKDIR /app
 COPY --from=app-build /app/artifacts/api-server/dist ./artifacts/api-server/dist
 
-# Simple entrypoint that matches the original behaviour
-COPY <<EOF /usr/local/bin/entrypoint.sh
-#!/bin/sh
-set -eu
-data_dir="\${BOT_DATA_DIR:-/data/telegram-video-bot}"
-mkdir -p "\$data_dir"
-chown -R node:node /data 2>/dev/null || true
-chown -R node:node "\$data_dir" 2>/dev/null || true
-exec su-exec node:node "\$@"
-EOF
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh
 
 EXPOSE 8080
