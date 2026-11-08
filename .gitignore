@@ -13,6 +13,11 @@ out-tsc
 /.env.*
 !/.env.example
 
+# Session credentials for yt-dlp — never commit
+cookies.txt
+**/cookies.txt
+**/cookies-*.txt
+
 # dependencies
 node_modules
 
