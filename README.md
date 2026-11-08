@@ -6,7 +6,7 @@ Source workspace for a Telegram bot that compresses uploaded videos to a chosen 
 
 - Node.js 24 or compatible
 - pnpm
-- Docker (for the Railway deployment; it installs FFmpeg, yt-dlp, and Telegram's local Bot API server)
+- Docker (for the Railway deployment; it installs FFmpeg, yt-dlp, Python, and Telegram's local Bot API server)
 
 ## Configure
 
@@ -46,6 +46,8 @@ Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot 
 In the configured private chat, `/railwayvars` shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by `/chatid`; the command is disabled until that ID is valid and only that private chat can use it. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
+
+The Docker image installs yt-dlp from PyPI and refreshes it when the container starts, so site-extractor fixes can arrive with a restart instead of waiting for Alpine's package repository. Update failures are logged but do not stop the bot; it keeps using the version included in the image. Set `YTDLP_AUTO_UPDATE=false` to disable startup updates and use the image's bundled version. This improves coverage for supported public sites, but cannot make every site work; private, login-gated, and DRM-protected sources remain unsupported.
 
 ## Bot behavior
 
