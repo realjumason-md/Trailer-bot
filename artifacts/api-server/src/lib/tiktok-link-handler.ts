@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import {
   parseDownloadUrl,
@@ -28,6 +29,7 @@ export type TikTokDownloadErrorCode =
   | "timeout"
   | "cancelled"
   | "public-only"
+  | "auth-required"
   | "downloader-missing"
   | "unsupported-format"
   | "download-failed";
@@ -84,6 +86,28 @@ export function findTikTokUrl(text = ""): string | null {
   return null;
 }
 
+/** Returns a readable cookies path if configured and present; otherwise null. */
+export async function resolveCookiesFile(): Promise<string | null> {
+  const fromEnv = process.env["YTDLP_COOKIES_FILE"]?.trim();
+  const candidates: string[] = [];
+  if (fromEnv) candidates.push(fromEnv);
+
+  const dataDir = process.env["BOT_DATA_DIR"]?.trim();
+  if (dataDir) {
+    candidates.push(path.join(dataDir, "cookies.txt"));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.R_OK);
+      return candidate;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
 export function tiktokFailureMessage(error: unknown): string {
   const code =
     error instanceof TikTokDownloadError ? error.code : "download-failed";
@@ -91,11 +115,13 @@ export function tiktokFailureMessage(error: unknown): string {
     case "too-large":
       return "That TikTok video is larger than this bot's 4 GB input limit.";
     case "timeout":
-      return "The TikTok download timed out. Try another public video link.";
+      return "The TikTok download timed out. Try another video link.";
     case "cancelled":
       return "TikTok video download cancelled.";
     case "public-only":
-      return "I can only fetch public TikTok videos that are accessible without signing in.";
+      return "I can only fetch public TikTok videos that are accessible without signing in. Add a cookies file to enable login-gated videos.";
+    case "auth-required":
+      return "That TikTok video needs a signed-in session. Update YTDLP_COOKIES_FILE with a fresh Netscape cookies.txt from an account that can view it.";
     case "downloader-missing":
       return "TikTok downloads are unavailable because yt-dlp is missing from this deployment.";
     case "unsupported-format":
@@ -112,11 +138,13 @@ export function publicVideoFailureMessage(error: unknown): string {
     case "too-large":
       return "That video is larger than this bot's 4 GB input limit.";
     case "timeout":
-      return "The public video download timed out. Try another link.";
+      return "The video download timed out. Try another link.";
     case "cancelled":
       return "Video download cancelled.";
     case "public-only":
-      return "I can only fetch videos that are public and accessible without signing in.";
+      return "I can only fetch videos that are public without signing in. Configure YTDLP_COOKIES_FILE for age-gated or login-walled pages.";
+    case "auth-required":
+      return "That video needs a signed-in session. Place a fresh Netscape cookies.txt at YTDLP_COOKIES_FILE (or BOT_DATA_DIR/cookies.txt) and restart.";
     case "downloader-missing":
       return "Public video-page downloads are unavailable because yt-dlp is missing from this deployment.";
     case "unsupported-format":
@@ -124,7 +152,7 @@ export function publicVideoFailureMessage(error: unknown): string {
     case "invalid-link":
       return "Send a public HTTP or HTTPS video link.";
     default:
-      return "I couldn't extract a public video from that page. It may be unsupported, unavailable, or require signing in.";
+      return "I couldn't extract a video from that page. It may be unsupported, unavailable, or still require a fresher login session.";
   }
 }
 
@@ -142,6 +170,7 @@ async function runYtDlp(
   const proxy = await startPublicEgressProxy();
   try {
     if (options.signal.aborted) throw new TikTokDownloadError("cancelled");
+
     const args = [
       "--ignore-config",
       "--no-playlist",
@@ -149,7 +178,7 @@ async function runYtDlp(
       "--socket-timeout",
       "30",
       "--retries",
-      "1",
+      "2",
       "--proxy",
       proxy.url,
       "--format",
@@ -160,8 +189,14 @@ async function runYtDlp(
       `${Math.floor(options.maxBytes / (1024 * 1024))}M`,
       "--output",
       path.join(outputDir, `${outputBaseName}.%(ext)s`),
-      url,
     ];
+
+    const cookiesFile = await resolveCookiesFile();
+    if (cookiesFile) {
+      args.push("--cookies", cookiesFile);
+    }
+
+    args.push(url);
 
     await new Promise<void>((resolve, reject) => {
       let child;
@@ -270,14 +305,18 @@ async function runYtDlp(
           finish(new TikTokDownloadError("timeout"));
         } else if (code !== 0) {
           const loginRequired =
-            /login required|private video|sign[- ]?in required|age[- ]?restricted/i.test(
+            /login required|private video|sign[- ]?in required|age[- ]?restricted|cookies? (are )?needed|confirm you.?re not a bot/i.test(
               stderr,
             );
-          finish(
-            new TikTokDownloadError(
-              loginRequired ? "public-only" : "download-failed",
-            ),
-          );
+          if (loginRequired) {
+            finish(
+              new TikTokDownloadError(
+                cookiesFile ? "auth-required" : "public-only",
+              ),
+            );
+          } else {
+            finish(new TikTokDownloadError("download-failed"));
+          }
         } else {
           finish();
         }
@@ -377,4 +416,4 @@ export async function downloadPublicSiteVideo(
   } finally {
     await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
   }
-}
+                               }
