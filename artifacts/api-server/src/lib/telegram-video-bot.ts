@@ -15,6 +15,10 @@ import {
   MAX_OUTSTANDING_VIDEOS,
   MAX_WAITING_COMPRESSIONS,
 } from "./video-queue-limits";
+import {
+  MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR,
+  recordVideoSubmission,
+} from "./video-submission-limits";
 import { parseRestartNotificationChatId } from "./restart-notification";
 import {
   buildRailwayDeploymentChecklist,
@@ -191,6 +195,7 @@ const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
+const videoSubmissions = new Map<number, number[]>();
 
 let botToken = "";
 let stopping = false;
@@ -391,6 +396,18 @@ function canPrepareAnotherVideo(chatId: number): boolean {
   return true;
 }
 
+function canSubmitVideo(chatId: number, userId: number): boolean {
+  const result = recordVideoSubmission(videoSubmissions, userId);
+  if (result.allowed) return true;
+
+  const retryMinutes = Math.max(1, Math.ceil(result.retryAfterMs / 60_000));
+  void sendMessage(
+    chatId,
+    `You’ve reached the limit of ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} video submissions per hour. Please try again in about ${retryMinutes} minute${retryMinutes === 1 ? "" : "s"}.`,
+  ).catch(() => undefined);
+  return false;
+}
+
 async function prepareVideo(
   message: TelegramMessage,
   file: TelegramFile,
@@ -404,6 +421,7 @@ async function prepareVideo(
     await sendMessage(message.chat.id, "This bot accepts videos up to 4 GB.");
     return;
   }
+  if (!canSubmitVideo(message.chat.id, userId)) return;
 
   const id = randomUUID();
   const preparation: PreparingVideo = {
@@ -616,6 +634,7 @@ async function prepareVideoFromUrl(
   const key = makeSessionKey(message.chat.id, userId);
 
   if (!canPrepareAnotherVideo(message.chat.id)) return;
+  if (!canSubmitVideo(message.chat.id, userId)) return;
 
   const id = randomUUID();
   const inputPath = path.join(JOBS_DIR, `${randomUUID()}.download`);
@@ -929,7 +948,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
-        "Compression is one video at a time; you can send up to six videos total, including videos being prepared, awaiting a resolution, queued, or compressing.",
+        `Compression is one video at a time; up to six videos can be outstanding across the bot. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour.`,
         "Use /chatid in a private chat to get its ID for restart notifications.",
         "Use /railwayvars in your configured private chat to see runtime settings; credential values are never sent.",
       ].join("\n"),

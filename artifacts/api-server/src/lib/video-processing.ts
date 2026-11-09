@@ -4,6 +4,9 @@ import { isAbsolute } from "node:path";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_TELEGRAM_OUTPUT_BYTES = 1_900_000_000;
+const MAX_COMPRESSION_DURATION_MS = 12 * 60 * 60 * 1_000;
+const MAX_PROBE_DURATION_MS = 5 * 60 * 1_000;
+const FORCE_KILL_GRACE_MS = 5_000;
 
 export type VideoResolution = {
   label: string;
@@ -98,6 +101,7 @@ export class VideoProcessingError extends Error {
       | "output_too_large"
       | "output_not_smaller"
       | "cancelled"
+      | "timeout"
       | "processing_failed",
   ) {
     super(message);
@@ -123,6 +127,7 @@ function runProcess(
   args: string[],
   onProcess: (child: ChildProcess) => void,
   onProgress?: (seconds: number) => void,
+  timeoutMs = MAX_PROBE_DURATION_MS,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -133,6 +138,13 @@ function runProcess(
     let stdout = "";
     let stderrTail = "";
     let progressBuffer = "";
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const clearTimers = (): void => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+    };
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -164,7 +176,20 @@ function runProcess(
       stderrTail = `${stderrTail}${chunk}`.slice(-2_000);
     });
 
+    timeoutTimer = setTimeout(
+      () => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(
+          () => child.kill("SIGKILL"),
+          FORCE_KILL_GRACE_MS,
+        );
+      },
+      Math.max(1, Math.ceil(timeoutMs)),
+    );
+
     child.once("error", () => {
+      clearTimers();
       reject(
         new VideoProcessingError(
           "The video processing tool could not start.",
@@ -173,6 +198,16 @@ function runProcess(
       );
     });
     child.once("close", (code, signal) => {
+      clearTimers();
+      if (timedOut) {
+        reject(
+          new VideoProcessingError(
+            "Video processing took too long. Try a shorter video or lower resolution.",
+            "timeout",
+          ),
+        );
+        return;
+      }
       if (code === 0) {
         resolve({ stdout });
         return;
@@ -231,6 +266,7 @@ export function parseCustomResolution(input: string): VideoResolution | null {
 async function probeVideo(
   inputPath: string,
   onProcess: (child: ChildProcess) => void,
+  timeoutMs = MAX_PROBE_DURATION_MS,
 ): Promise<VideoInfo> {
   const result = await runProcess(
     "ffprobe",
@@ -246,6 +282,8 @@ async function probeVideo(
       inputPath,
     ],
     onProcess,
+    undefined,
+    timeoutMs,
   );
 
   try {
@@ -279,9 +317,10 @@ async function probeVideo(
 export async function inspectVideoInfo(
   inputPath: string,
   onProcess: (child: ChildProcess | null) => void = () => undefined,
+  timeoutMs = MAX_PROBE_DURATION_MS,
 ): Promise<VideoInfo> {
   try {
-    return await probeVideo(inputPath, (child) => onProcess(child));
+    return await probeVideo(inputPath, (child) => onProcess(child), timeoutMs);
   } finally {
     onProcess(null);
   }
@@ -355,7 +394,25 @@ export async function compressVideo(options: {
   onProcess: (child: ChildProcess | null) => void;
   onVideoInfo: (info: VideoInfo) => void;
   onProgress: (progress: CompressionProgress) => void;
+  maxProcessingTimeMs?: number;
 }): Promise<CompressionResult> {
+  const maxProcessingTimeMs =
+    options.maxProcessingTimeMs ?? MAX_COMPRESSION_DURATION_MS;
+  if (!Number.isFinite(maxProcessingTimeMs) || maxProcessingTimeMs <= 0) {
+    throw new RangeError("The maximum processing time must be positive.");
+  }
+  const deadlineAt = Date.now() + maxProcessingTimeMs;
+  const remainingProcessingTime = (): number => {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      throw new VideoProcessingError(
+        "Video processing took too long. Try a shorter video or lower resolution.",
+        "timeout",
+      );
+    }
+    return remaining;
+  };
+
   const inputPath = options.inputPath;
   if (!isAbsolute(inputPath)) {
     throw new VideoProcessingError(
@@ -378,7 +435,11 @@ export async function compressVideo(options: {
     );
   }
 
-  const info = await inspectVideoInfo(inputPath, options.onProcess);
+  const info = await inspectVideoInfo(
+    inputPath,
+    options.onProcess,
+    Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+  );
   options.onVideoInfo(info);
   const dimensions = getOutputDimensions(
     info.width,
@@ -445,6 +506,7 @@ export async function compressVideo(options: {
             durationSeconds: info.durationSeconds,
           });
         },
+        remainingProcessingTime(),
       );
 
       outputBytes = (await stat(options.outputPath)).size;
@@ -470,8 +532,10 @@ export async function compressVideo(options: {
     }
 
     // Telegram may not infer metadata from local file:// uploads; probe the finished MP4.
-    const outputInfo = await probeVideo(options.outputPath, (child) =>
-      options.onProcess(child),
+    const outputInfo = await probeVideo(
+      options.outputPath,
+      (child) => options.onProcess(child),
+      Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
     );
 
     return {
@@ -496,4 +560,5 @@ export async function compressVideo(options: {
 export const videoLimits = {
   maxInputBytes: MAX_INPUT_BYTES,
   maxTelegramOutputBytes: MAX_TELEGRAM_OUTPUT_BYTES,
+  maxCompressionDurationMs: MAX_COMPRESSION_DURATION_MS,
 };
