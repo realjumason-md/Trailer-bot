@@ -17,7 +17,6 @@ RUN pnpm install --frozen-lockfile \
 FROM node:24-alpine AS runtime
 
 ENV NODE_ENV=production
-ENV BOT_DATA_DIR=/data/telegram-video-bot
 ENV YTDLP_AUTO_UPDATE=true
 
 RUN apk add --no-cache \

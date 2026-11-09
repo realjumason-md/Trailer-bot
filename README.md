@@ -35,7 +35,7 @@ The API health check is available at `/api/healthz`. It returns a successful res
 
 ## Deploy to Railway
 
-Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot API server and installs FFmpeg, `ffprobe`, and yt-dlp, so the service does not depend on packages preinstalled in the Railway image.
+Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot API server and installs FFmpeg, `ffprobe`, and yt-dlp, so the service does not depend on packages preinstalled in the Railway image. Without a volume, the bot stores working files under `/tmp/telegram-video-bot`; set `BOT_DATA_DIR` to `/data/telegram-video-bot` when using the persistent volume below.
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
 2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video and the compressed output at the same time.
@@ -47,13 +47,15 @@ In the configured private chat, `/railwayvars` shows the bot's known non-secret 
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
 
-The Docker image installs yt-dlp from PyPI and refreshes it when the container starts, so site-extractor fixes can arrive with a restart instead of waiting for Alpine's package repository. Update failures are logged but do not stop the bot; it keeps using the version included in the image. Set `YTDLP_AUTO_UPDATE=false` to disable startup updates and use the image's bundled version. This improves coverage for supported public sites, but cannot make every site work; private, login-gated, and DRM-protected sources remain unsupported.
+The Docker image installs yt-dlp from PyPI and refreshes it when the container starts, so site-extractor fixes can arrive with a restart instead of waiting for Alpine's package repository. Update failures are logged but do not stop the bot; it keeps using the version included in the image. Set `YTDLP_AUTO_UPDATE=false` to disable startup updates and use the image's bundled version. This improves coverage for supported sites, but cannot make every site work; DRM-protected sources remain unsupported.
+
+For supported sites that require an authenticated session, optionally provide a Netscape-format cookie file with `YTDLP_COOKIES_FILE` (it must be readable by the `node` user), or set `YTDLP_COOKIES_CONTENT` through the deployment's secret-variable manager to have the entrypoint write it with restricted permissions. Do not commit cookie files or paste their contents into chat. Cookies only grant the access of the account they came from; they do not unlock DRM-protected media.
 
 ## Bot behavior
 
 - Accepts video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links to video files up to 4 GB.
-- If a link opens a web page instead of a video file, tries yt-dlp extraction for public pages on supported sites, including TikTok. Site coverage and availability vary; private, login-gated, and DRM-protected videos are not supported. The bot does not use sign-ins or saved browser cookies.
+- If a link opens a web page instead of a video file, tries yt-dlp extraction for supported sites, including TikTok. Site coverage and availability vary. A configured Netscape cookies file can be used for supported pages accessible to that account; DRM-protected media remains unsupported.
 - Probes the video's real dimensions before showing choices. The resolution menu shows the exact original dimensions, then 144p/240p/320p/360p/480p/640p/720p/960p/1080p/1440p/2160p presets that downscale the source, plus Custom resolution. Upscaling is rejected.
 - Encodes with H.264 using the fast preset and a smaller-first CRF ladder (27, 31, 35, 38), stopping at the first output smaller than the source and below Telegram's 1.9 GB limit. Higher CRF values trade more image quality for smaller files; difficult inputs may need up to four full encoding attempts. Same-resolution mode copies the source audio; output is sent only if smaller than the original.
 - Never sends the untouched original as a compressed result. Successful outputs are sent with Telegram's video method so they can play inline; if compression cannot make the file smaller, the bot explains the failure and keeps lower/custom-size choices available.

@@ -921,7 +921,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       message.chat.id,
       [
         "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
-        "Page extraction uses yt-dlp without sign-in or saved browser cookies. Site coverage varies; private, login-gated, and DRM-protected videos are not supported.",
+        "Page extraction uses yt-dlp without sign-in by default. If you configured a Netscape cookies file, yt-dlp can use that session for supported sites and videos your account can view; cookies are sensitive, and DRM-protected videos may still be unavailable.",
         "The extractor does not support every website, and some pages may block automated access.",
         "The bot shows the original dimensions, then offers same-resolution compression and lower output sizes. Same-resolution results are sent only when they are smaller than the source.",
         "",
