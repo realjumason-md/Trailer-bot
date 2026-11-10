@@ -1,7 +1,7 @@
 import { lstat, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
-export const JOB_ARTIFACT_MIN_AGE_MS = 6 * 60 * 60 * 1_000;
+export const JOB_ARTIFACT_MIN_AGE_MS = 2 * 60 * 60 * 1_000;
 
 /**
  * Removes old top-level job artifacts unless they contain a path tracked by

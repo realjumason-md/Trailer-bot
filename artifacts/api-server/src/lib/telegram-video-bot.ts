@@ -200,7 +200,7 @@ const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
-const JOB_ARTIFACT_CLEANUP_INTERVAL_MS = 15 * 60 * 1_000;
+const JOB_ARTIFACT_CLEANUP_INTERVAL_MS = 30 * 60 * 1_000;
 const videoSubmissions = new Map<number, number[]>();
 
 let botToken = "";
@@ -418,7 +418,7 @@ function trackedJobArtifactPaths(): string[] {
   return paths;
 }
 
-async function cleanupStaleJobArtifacts(): Promise<void> {
+async function cleanupOrphanedJobFiles(): Promise<void> {
   try {
     const removed = await removeStaleJobArtifacts(
       JOBS_DIR,
@@ -438,7 +438,7 @@ async function cleanupStaleJobArtifacts(): Promise<void> {
 function startJobArtifactCleanup(): void {
   if (jobArtifactCleanupTimer) clearInterval(jobArtifactCleanupTimer);
   jobArtifactCleanupTimer = setInterval(
-    () => void cleanupStaleJobArtifacts(),
+    () => void cleanupOrphanedJobFiles(),
     JOB_ARTIFACT_CLEANUP_INTERVAL_MS,
   );
   jobArtifactCleanupTimer.unref();
@@ -1786,7 +1786,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     mkdir(BOT_API_TEMP_DIR, { recursive: true }),
     mkdir(JOBS_DIR, { recursive: true }),
   ]);
-  await cleanupStaleJobArtifacts();
+  await cleanupOrphanedJobFiles();
   startJobArtifactCleanup();
 
   try {

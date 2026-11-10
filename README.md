@@ -96,7 +96,7 @@ For supported sites that require an authenticated session, optionally provide a 
 - Sends each compressed video as a reply to the exact original upload or link message; includes the source URL in the caption when it fits.
 - Accepts up to six outstanding videos across the bot, compresses one video at a time, and limits each Telegram user to six submissions per rolling hour and 20 per rolling 24 hours. Other videos wait in a bounded FIFO queue; the 30-minute selection timeout does not apply after a video is queued.
 - `/status` shows active, queued, prepared, or downloading work. `/cancel` cancels the next waiting item; `/cancel active` stops the current compression.
-- Queue and rate-limit state are in memory. Restarts cancel pending and active jobs and reset the hourly/daily quotas. A startup and 15-minute cleanup sweep removes untracked job artifacts older than six hours while preserving files referenced by the current queue. Telegram's own `api-temp` directory is left to the local Bot API server.
+- Queue and rate-limit state are in memory. Restarts cancel pending and active jobs and reset the hourly/daily quotas. A startup and 30-minute cleanup sweep removes untracked job artifacts older than two hours while preserving files referenced by the current queue. Telegram's own `api-temp` directory is left to the local Bot API server.
 
 ## Source layout
 

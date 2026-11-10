@@ -3,7 +3,10 @@ import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { removeStaleJobArtifacts } from "./job-artifact-cleanup.ts";
+import {
+  JOB_ARTIFACT_MIN_AGE_MS,
+  removeStaleJobArtifacts,
+} from "./job-artifact-cleanup.ts";
 
 test("removes stale untracked artifacts but preserves recent and active jobs", async () => {
   const jobsDirectory = await mkdtemp(path.join(tmpdir(), "job-cleanup-test-"));
@@ -12,7 +15,7 @@ test("removes stale untracked artifacts but preserves recent and active jobs", a
   const recentFile = path.join(jobsDirectory, "recent.download");
   const activeDirectory = path.join(jobsDirectory, "active-job");
   const activeOutput = path.join(activeDirectory, "output.mp4");
-  const staleDate = new Date(now - 10_000);
+  const staleDate = new Date(now - JOB_ARTIFACT_MIN_AGE_MS - 1);
 
   await writeFile(oldFile, "old");
   await writeFile(recentFile, "recent");
@@ -26,7 +29,6 @@ test("removes stale untracked artifacts but preserves recent and active jobs", a
       jobsDirectory,
       [activeOutput],
       now,
-      5_000,
     );
 
     assert.equal(removed, 1);
