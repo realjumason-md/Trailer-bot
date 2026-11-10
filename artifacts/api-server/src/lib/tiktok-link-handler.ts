@@ -100,7 +100,7 @@ export async function resolveCookiesFile(): Promise<string | null> {
   for (const candidate of candidates) {
     try {
       await access(candidate, fsConstants.R_OK);
-      return candidate;
+      if ((await stat(candidate)).isFile()) return candidate;
     } catch {
       // try next
     }
@@ -119,7 +119,7 @@ export function tiktokFailureMessage(error: unknown): string {
     case "cancelled":
       return "TikTok video download cancelled.";
     case "public-only":
-      return "I can only fetch public TikTok videos that are accessible without signing in. Add a cookies file to enable login-gated videos.";
+      return "I can fetch public TikTok videos without signing in. For supported videos your account can view, a configured cookies file may help.";
     case "auth-required":
       return "That TikTok video needs a signed-in session. Update YTDLP_COOKIES_FILE with a fresh Netscape cookies.txt from an account that can view it.";
     case "downloader-missing":
@@ -152,7 +152,7 @@ export function publicVideoFailureMessage(error: unknown): string {
     case "invalid-link":
       return "Send a public HTTP or HTTPS video link.";
     default:
-      return "I couldn't extract a video from that page. It may be unsupported, unavailable, or still require a fresher login session.";
+      return "I couldn't extract a video from that page. It may be unsupported, unavailable, or blocking automated downloads.";
   }
 }
 
@@ -305,7 +305,7 @@ async function runYtDlp(
           finish(new TikTokDownloadError("timeout"));
         } else if (code !== 0) {
           const loginRequired =
-            /login required|private video|sign[- ]?in required|age[- ]?restricted|cookies? (are )?needed|confirm you.?re not a bot/i.test(
+            /login required|private video|sign[- ]?in required|age[- ]?restricted|cookies? (are )?needed/i.test(
               stderr,
             );
           if (loginRequired) {
@@ -416,4 +416,4 @@ export async function downloadPublicSiteVideo(
   } finally {
     await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
   }
-                               }
+}

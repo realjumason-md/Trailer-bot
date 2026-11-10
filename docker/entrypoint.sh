@@ -8,10 +8,16 @@ mkdir -p "$data_dir"
 if [ -n "${YTDLP_COOKIES_CONTENT:-}" ]; then
   cookies_path="${YTDLP_COOKIES_FILE:-$data_dir/cookies.txt}"
   mkdir -p "$(dirname "$cookies_path")"
-  # Use printf so newlines in the variable are preserved
-  printf '%s\n' "$YTDLP_COOKIES_CONTENT" > "$cookies_path"
-  chmod 600 "$cookies_path"
+  cookies_tmp="$(mktemp "${cookies_path}.tmp.XXXXXX")"
+  (
+    umask 077
+    printf '%s\n' "$YTDLP_COOKIES_CONTENT" > "$cookies_tmp"
+  )
+  chmod 600 "$cookies_tmp"
+  mv -f "$cookies_tmp" "$cookies_path"
+  chown node:node "$cookies_path"
   export YTDLP_COOKIES_FILE="$cookies_path"
+  unset YTDLP_COOKIES_CONTENT
   echo "Wrote yt-dlp cookies to $cookies_path" >&2
 fi
 
