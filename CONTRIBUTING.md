@@ -17,8 +17,8 @@ pnpm run typecheck
 pnpm --filter @workspace/api-server run test
 ```
 
-GitHub Actions runs the same checks on pushes and pull requests to `main`.
-The CI job does not build the Docker image.
+GitHub Actions runs the same checks and builds the production Docker image on
+pushes to `main` and pull requests targeting `main`.
 
 ## Architecture
 
@@ -32,9 +32,9 @@ The CI job does not build the Docker image.
   local public-egress proxy for supported site pages.
 - `artifacts/api-server/src/lib/video-processing.ts` probes and compresses
   videos with ffprobe and FFmpeg.
-- `lib/` contains shared workspace packages; the bot's active queue and pending
-  jobs are not persisted to the database.
+- `lib/api-zod` contains the generated health-response schema used by the API
+  server. `lib/api-spec` is its OpenAPI source and Zod code generator.
 
 The deployment is designed for one long-polling replica. Jobs, rate-limit
 windows, and queue state live in process memory, so restarts cancel in-flight
-work rather than resuming it.
+work and reset rate-limit windows rather than resuming it.

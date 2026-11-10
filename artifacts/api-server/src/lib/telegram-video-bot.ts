@@ -10,6 +10,7 @@ import { compressedVideoFileName } from "./compressed-video-file-name";
 import { retryWithBackoff } from "./retry-with-backoff";
 import { buildCompressionResultCaption } from "./compression-result-caption";
 import { getNextPendingVideoExpiry } from "./pending-video-expiration";
+import { removeStaleJobArtifacts } from "./job-artifact-cleanup";
 import {
   canAcceptVideo,
   MAX_OUTSTANDING_VIDEOS,
@@ -17,6 +18,7 @@ import {
 } from "./video-queue-limits";
 import {
   MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR,
+  MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY,
   recordVideoSubmission,
 } from "./video-submission-limits";
 import { parseRestartNotificationChatId } from "./restart-notification";
@@ -153,6 +155,7 @@ type PreparingVideo = {
   key: string;
   chatId: number;
   source: "upload" | "url" | "tiktok";
+  filePath?: string;
   fileSize?: number;
   durationSeconds?: number;
   statusMessageId?: number;
@@ -171,6 +174,8 @@ type ActiveJob = {
   videoId: string;
   key: string;
   chatId: number;
+  inputPath: string;
+  outputDirectory?: string;
   cancelled: boolean;
   child: ChildProcess | null;
   resolution: string;
@@ -195,6 +200,7 @@ const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
+const JOB_ARTIFACT_CLEANUP_INTERVAL_MS = 15 * 60 * 1_000;
 const videoSubmissions = new Map<number, number[]>();
 
 let botToken = "";
@@ -204,6 +210,7 @@ let activeJob: ActiveJob | null = null;
 const pendingVideos = new Map<string, PendingVideo>();
 const preparingVideos = new Map<string, PreparingVideo>();
 const compressionQueue = new FifoQueue<QueueEntry>(MAX_WAITING_COMPRESSIONS);
+let jobArtifactCleanupTimer: NodeJS.Timeout | null = null;
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -396,14 +403,60 @@ function canPrepareAnotherVideo(chatId: number): boolean {
   return true;
 }
 
+function trackedJobArtifactPaths(): string[] {
+  const paths = [
+    ...[...pendingVideos.values()].map((video) => video.filePath),
+    ...[...preparingVideos.values()].flatMap((preparation) =>
+      preparation.filePath ? [preparation.filePath] : [],
+    ),
+    ...compressionQueue.toArray().map((entry) => entry.pending.filePath),
+  ];
+  if (activeJob) {
+    paths.push(activeJob.inputPath);
+    if (activeJob.outputDirectory) paths.push(activeJob.outputDirectory);
+  }
+  return paths;
+}
+
+async function cleanupStaleJobArtifacts(): Promise<void> {
+  try {
+    const removed = await removeStaleJobArtifacts(
+      JOBS_DIR,
+      trackedJobArtifactPaths(),
+    );
+    if (removed > 0) {
+      logger.info({ removed }, "Removed stale video job artifacts");
+    }
+  } catch (error) {
+    logger.warn(
+      { code: errorName(error) },
+      "Could not clean stale video job artifacts",
+    );
+  }
+}
+
+function startJobArtifactCleanup(): void {
+  if (jobArtifactCleanupTimer) clearInterval(jobArtifactCleanupTimer);
+  jobArtifactCleanupTimer = setInterval(
+    () => void cleanupStaleJobArtifacts(),
+    JOB_ARTIFACT_CLEANUP_INTERVAL_MS,
+  );
+  jobArtifactCleanupTimer.unref();
+}
+
 function canSubmitVideo(chatId: number, userId: number): boolean {
   const result = recordVideoSubmission(videoSubmissions, userId);
   if (result.allowed) return true;
 
   const retryMinutes = Math.max(1, Math.ceil(result.retryAfterMs / 60_000));
+  const limitName = result.limit === "hour" ? "per hour" : "per day";
+  const limitCount =
+    result.limit === "hour"
+      ? MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR
+      : MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY;
   void sendMessage(
     chatId,
-    `You’ve reached the limit of ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} video submissions per hour. Please try again in about ${retryMinutes} minute${retryMinutes === 1 ? "" : "s"}.`,
+    `You’ve reached the limit of ${limitCount} video submissions ${limitName}. Please try again in about ${retryMinutes} minute${retryMinutes === 1 ? "" : "s"}.`,
   ).catch(() => undefined);
   return false;
 }
@@ -644,6 +697,7 @@ async function prepareVideoFromUrl(
     key,
     chatId: message.chat.id,
     source,
+    filePath: inputPath,
     startedAt: Date.now(),
     cancelled: false,
     abortController,
@@ -948,7 +1002,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
-        `Compression is one video at a time; up to six videos can be outstanding across the bot. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour.`,
+        `Compression is one video at a time; up to six videos can be outstanding across the bot. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
         "Use /chatid in a private chat to get its ID for restart notifications.",
         "Use /railwayvars in your configured private chat to see runtime settings; credential values are never sent.",
       ].join("\n"),
@@ -1334,6 +1388,7 @@ async function beginCompression(
     videoId: pending.id,
     key: pending.key,
     chatId: pending.chatId,
+    inputPath: pending.filePath,
     cancelled: false,
     child: null,
     resolution: resolution.label,
@@ -1376,6 +1431,7 @@ async function runCompressionJob(
     outputDirectory,
     compressedVideoFileName(pending.fileName),
   );
+  job.outputDirectory = outputDirectory;
   try {
     await mkdir(outputDirectory, { recursive: true });
     inputPath = pending.filePath;
@@ -1730,6 +1786,8 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     mkdir(BOT_API_TEMP_DIR, { recursive: true }),
     mkdir(JOBS_DIR, { recursive: true }),
   ]);
+  await cleanupStaleJobArtifacts();
+  startJobArtifactCleanup();
 
   try {
     localApiProcess = startLocalBotApi();
@@ -1800,6 +1858,10 @@ export async function startTelegramVideoBot(): Promise<() => void> {
 
 export function stopTelegramVideoBot(): void {
   stopping = true;
+  if (jobArtifactCleanupTimer) {
+    clearInterval(jobArtifactCleanupTimer);
+    jobArtifactCleanupTimer = null;
+  }
   activeJob?.child?.kill("SIGTERM");
   for (const preparation of preparingVideos.values()) {
     preparation.cancelled = true;
