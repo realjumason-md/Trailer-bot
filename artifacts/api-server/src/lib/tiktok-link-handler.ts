@@ -375,6 +375,8 @@ async function runYtDlp(
 
     const args = [
       "--ignore-config",
+      "--js-runtimes",
+      "node",
       "--no-playlist",
       "--no-warnings",
       "--newline",

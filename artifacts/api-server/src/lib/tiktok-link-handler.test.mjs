@@ -185,6 +185,7 @@ test("runs yt-dlp without cookies, config, bot credentials, or login and rejects
     const args = await readFile(argumentLog, "utf8");
     const childEnvironment = await readFile(environmentLog, "utf8");
     assert.match(args, /--ignore-config/);
+    assert.match(args, /--js-runtimes\nnode\n/);
     assert.match(args, /--no-playlist/);
     assert.match(args, /--proxy\nhttp:\/\/127\.0\.0\.1:\d+/);
     assert.doesNotMatch(args, /--cookies(?:-from-browser)?/);

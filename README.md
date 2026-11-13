@@ -52,7 +52,7 @@ sudo apt-get update
 sudo apt-get install -y ffmpeg python3 python3-venv
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade pip yt-dlp
+python -m pip install --upgrade pip "yt-dlp[default]"
 ```
 
 Install Telegram's official
@@ -78,7 +78,7 @@ In the configured private chat, `/railwayvars` shows the bot's known non-secret 
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
 
-The Docker image installs yt-dlp from PyPI and refreshes it when the container starts, so site-extractor fixes can arrive with a restart instead of waiting for Alpine's package repository. Update failures are logged but do not stop the bot; it keeps using the version included in the image. Set `YTDLP_AUTO_UPDATE=false` to disable startup updates and use the image's bundled version. This improves coverage for supported sites, but cannot make every site work; DRM-protected sources remain unsupported.
+The Docker image installs `yt-dlp[default]` from PyPI, including the YouTube EJS scripts, and refreshes that extra when the container starts. The `node:24-alpine` runtime provides Node 24, which yt-dlp explicitly enables for JavaScript challenge solving. Update failures are logged but do not stop the bot; it keeps using the version included in the image. Set `YTDLP_AUTO_UPDATE=false` to disable startup updates and use the image's bundled version. This improves YouTube support but cannot make every site work; DRM-protected sources remain unsupported.
 
 For supported sites that require an authenticated session, export a Netscape-format cookie file from a browser session that is authorized to view the video. Transfer it through a secure deployment workflow: set `YTDLP_COOKIES_FILE` to a readable file path, or store the file contents in the deployment's secret-variable manager as `YTDLP_COOKIES_CONTENT`. The entrypoint writes the latter with restricted permissions. Replace the file when the session expires. Never commit cookie files or paste their contents into chat. Cookies only grant the access of the account they came from; they do not unlock private content the account cannot view or DRM-protected media.
 

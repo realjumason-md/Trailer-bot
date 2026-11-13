@@ -28,7 +28,7 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
   && python3 -m venv /opt/yt-dlp \
-  && /opt/yt-dlp/bin/pip install --disable-pip-version-check --no-cache-dir --timeout 20 --retries 1 yt-dlp \
+  && /opt/yt-dlp/bin/pip install --disable-pip-version-check --no-cache-dir --timeout 20 --retries 1 "yt-dlp[default]" \
   && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp \
   && yt-dlp --version
 

@@ -22,7 +22,7 @@ if [ -n "${YTDLP_COOKIES_CONTENT:-}" ]; then
 fi
 
 if [ "${YTDLP_AUTO_UPDATE:-true}" = "true" ]; then
-  if /opt/yt-dlp/bin/pip install --disable-pip-version-check --no-cache-dir --timeout 20 --retries 1 --upgrade yt-dlp; then
+  if /opt/yt-dlp/bin/pip install --disable-pip-version-check --no-cache-dir --timeout 20 --retries 1 --upgrade "yt-dlp[default]"; then
     echo "Using yt-dlp $(/usr/local/bin/yt-dlp --version)" >&2
   else
     echo "Warning: yt-dlp update failed; using bundled version $(/usr/local/bin/yt-dlp --version)" >&2
