@@ -3,15 +3,19 @@ import test from "node:test";
 import {
   canAcceptVideo,
   MAX_OUTSTANDING_VIDEOS,
+  MAX_WAITING_COMPRESSIONS,
 } from "./video-queue-limits.ts";
 
-test("accepts five videos sent together without a lower preparation cap", () => {
-  for (let outstanding = 0; outstanding < 5; outstanding += 1) {
+test("allows ten waiting videos plus one active or preparing video", () => {
+  assert.equal(MAX_WAITING_COMPRESSIONS, 10);
+  assert.equal(MAX_OUTSTANDING_VIDEOS, 11);
+  for (
+    let outstanding = 0;
+    outstanding < MAX_OUTSTANDING_VIDEOS;
+    outstanding += 1
+  ) {
     assert.equal(canAcceptVideo(outstanding), true);
   }
-});
-
-test("retains the six-video total limit", () => {
   assert.equal(canAcceptVideo(MAX_OUTSTANDING_VIDEOS - 1), true);
   assert.equal(canAcceptVideo(MAX_OUTSTANDING_VIDEOS), false);
 });

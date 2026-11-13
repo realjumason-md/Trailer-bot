@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rmdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -32,9 +32,18 @@ import {
   RemoteVideoDownloadError,
 } from "./remote-video-download";
 import {
+  extractVideoFromZip,
+  isZipArchive,
+  VideoArchiveError,
+  videoArchiveFailureMessage,
+} from "./video-archive";
+import {
   downloadTikTokVideo,
   downloadPublicSiteVideo,
   findTikTokUrl,
+  getCookiesRuntimeStatus,
+  getVideoSiteName,
+  isStreamingManifestUrl,
   publicVideoFailureMessage,
   TikTokDownloadError,
   tiktokFailureMessage,
@@ -704,18 +713,23 @@ async function prepareVideoFromUrl(
   };
   preparingVideos.set(id, preparation);
   let fileTransferredToPending = false;
+  const siteName = source === "tiktok" ? "TikTok" : getVideoSiteName(url);
 
   try {
     const status = await sendMessage(
       message.chat.id,
       source === "tiktok"
         ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
-        : "Downloading the public video link (maximum 4 GB). If it opens a supported video page, I’ll try to extract the video. You’ll choose an output resolution when it’s ready.",
+        : `Preparing this public ${siteName} video link (maximum 4 GB). You’ll choose an output resolution when the video is ready.`,
     );
     preparation.statusMessageId = status.message_id;
 
     let lastProgressAt = Date.now();
     let lastProgressPercent = -10;
+    let progressActivity =
+      source === "tiktok"
+        ? "Fetching TikTok video"
+        : `Downloading ${siteName} video`;
     const reportDownloadProgress = (
       downloadedBytes: number,
       totalBytes?: number,
@@ -737,39 +751,70 @@ async function prepareVideoFromUrl(
         void editMessage(
           message.chat.id,
           status.message_id,
-          `${source === "tiktok" ? "Fetching TikTok video" : "Downloading video"}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
+          `${progressActivity}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
         ).catch(() => undefined);
       }
     };
-    const downloadedBytes =
+    const downloadWithYtDlp = (): Promise<number> =>
+      downloadPublicSiteVideo(url, inputPath, {
+        maxBytes: videoLimits.maxInputBytes,
+        signal: abortController.signal,
+        onProgress: (bytes, totalBytes) =>
+          reportDownloadProgress(bytes, totalBytes),
+      });
+    let downloadedBytes =
       source === "tiktok"
         ? await downloadTikTokVideo(url, inputPath, {
             maxBytes: videoLimits.maxInputBytes,
             signal: abortController.signal,
             onProgress: (bytes) => reportDownloadProgress(bytes),
           })
-        : await downloadRemoteVideo(url, inputPath, {
-            maxBytes: videoLimits.maxInputBytes,
-            signal: abortController.signal,
-            onProgress: (progress) =>
-              reportDownloadProgress(
-                progress.downloadedBytes,
-                progress.totalBytes,
-              ),
-          }).catch(async (error: unknown) => {
-            if (
-              abortController.signal.aborted ||
-              (error instanceof RemoteVideoDownloadError &&
-                /4 GB/u.test(error.message))
-            ) {
-              throw error;
-            }
-            return downloadPublicSiteVideo(url, inputPath, {
+        : isStreamingManifestUrl(url)
+          ? await downloadWithYtDlp()
+          : await downloadRemoteVideo(url, inputPath, {
               maxBytes: videoLimits.maxInputBytes,
               signal: abortController.signal,
-              onProgress: (bytes) => reportDownloadProgress(bytes),
+              onProgress: (progress) =>
+                reportDownloadProgress(
+                  progress.downloadedBytes,
+                  progress.totalBytes,
+                ),
+            }).catch(async (error: unknown) => {
+              if (
+                abortController.signal.aborted ||
+                (error instanceof RemoteVideoDownloadError &&
+                  /4 GB/u.test(error.message))
+              ) {
+                throw error;
+              }
+              return downloadWithYtDlp();
             });
-          });
+
+    let extractedArchiveFileName: string | undefined;
+    if (source !== "tiktok" && (await isZipArchive(inputPath))) {
+      progressActivity = `Extracting ${siteName} archive`;
+      lastProgressAt = Date.now();
+      lastProgressPercent = -10;
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        `Downloaded ${formatBytes(downloadedBytes)} from ${siteName}. Extracting the video from the ZIP archive now.`,
+      ).catch(() => undefined);
+      const extractedPath = `${inputPath}.extracted`;
+      const extracted = await extractVideoFromZip(inputPath, extractedPath, {
+        maxBytes: videoLimits.maxInputBytes,
+        signal: abortController.signal,
+        onProgress: (bytes, totalBytes) =>
+          reportDownloadProgress(bytes, totalBytes),
+      });
+      if (preparation.cancelled || abortController.signal.aborted) {
+        await unlink(extractedPath).catch(() => undefined);
+        throw new VideoArchiveError("cancelled");
+      }
+      await rename(extractedPath, inputPath);
+      downloadedBytes = extracted.fileSize;
+      extractedArchiveFileName = extracted.fileName;
+    }
 
     if (preparation.cancelled) {
       await unlink(inputPath).catch(() => undefined);
@@ -813,7 +858,7 @@ async function prepareVideoFromUrl(
     const fileName =
       source === "tiktok"
         ? "tiktok-video.mp4"
-        : path.basename(parsedUrl.pathname);
+        : (extractedArchiveFileName ?? path.basename(parsedUrl.pathname));
     const pending: PendingVideo = {
       id,
       key,
@@ -873,12 +918,14 @@ async function prepareVideoFromUrl(
       : error instanceof TikTokDownloadError
         ? source === "tiktok"
           ? tiktokFailureMessage(error)
-          : publicVideoFailureMessage(error)
-        : error instanceof VideoProcessingError
-          ? error.message
-          : error instanceof RemoteVideoDownloadError
+          : publicVideoFailureMessage(error, siteName)
+        : error instanceof VideoArchiveError
+          ? videoArchiveFailureMessage(error)
+          : error instanceof VideoProcessingError
             ? error.message
-            : "I couldn’t download that video link. Check it and try again.";
+            : error instanceof RemoteVideoDownloadError
+              ? error.message
+              : "I couldn’t download that video link. Check it and try again.";
     if (preparation.statusMessageId != null) {
       await editMessage(
         message.chat.id,
@@ -993,18 +1040,20 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
-        "Page extraction uses yt-dlp without sign-in by default. If you configured a Netscape cookies file, yt-dlp can use that session for supported sites and videos your account can view; cookies are sensitive, and DRM-protected videos may still be unavailable.",
-        "The extractor does not support every website, and some pages may block automated access.",
+        "Send me a video up to 4 GB, paste a direct public video-file or ZIP link, or send a public video page link from a supported site.",
+        "A ZIP link must contain a supported video under 4 GB. The bot extracts the largest video in the archive; password-protected archives are not supported.",
+        "Public page extraction uses yt-dlp. Common examples include YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo, but support varies by site and extractor version. Direct HLS/DASH manifest links are handled by yt-dlp.",
+        "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
+        "Some sites temporarily rate-limit downloads or change their extractors. The bot reports those separately from login-required, geo-restricted, and unsupported pages.",
         "The bot shows the original dimensions, then offers same-resolution compression and lower output sizes. Same-resolution results are sent only when they are smaller than the source.",
         "",
         "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
-        `Compression is one video at a time; up to six videos can be outstanding across the bot. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
+        `Compression is one video at a time; up to ${MAX_WAITING_COMPRESSIONS} videos can wait in the queue, with a maximum of ${MAX_OUTSTANDING_VIDEOS} active, queued, preparing, or prepared videos total. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
         "Use /chatid in a private chat to get its ID for restart notifications.",
-        "Use /railwayvars in your configured private chat to see runtime settings; credential values are never sent.",
+        "Use /railwayvars in your configured private chat to see runtime settings and whether a readable yt-dlp cookies file is loaded; credential values are never sent.",
       ].join("\n"),
     );
     return;
@@ -1040,9 +1089,16 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       return;
     }
 
+    const cookiesStatus = await getCookiesRuntimeStatus();
+    const cookiesStatusMessage =
+      cookiesStatus === "loaded"
+        ? "yt-dlp cookies: a readable cookie file is loaded."
+        : cookiesStatus === "configured-unavailable"
+          ? "yt-dlp cookies: configured, but no readable cookie file was found."
+          : "yt-dlp cookies: not configured; public downloads only.";
     await sendMessage(
       message.chat.id,
-      buildRailwayDeploymentChecklist(process.env),
+      `${buildRailwayDeploymentChecklist(process.env)}\n\n${cookiesStatusMessage}`,
     );
     return;
   }
@@ -1195,7 +1251,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       );
       void sendMessage(
         message.chat.id,
-        "I couldn’t prepare that video link. Try a direct public video link or a public page from a supported site.",
+        publicVideoFailureMessage(error, getVideoSiteName(videoUrl)),
       ).catch(() => undefined);
     });
     return;
