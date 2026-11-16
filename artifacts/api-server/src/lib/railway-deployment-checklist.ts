@@ -53,6 +53,11 @@ export function buildRailwayDeploymentChecklist(
     )}`,
     `NODE_ENV: ${settingValue(env, "NODE_ENV", "(not set)")}`,
     `LOG_LEVEL: ${settingValue(env, "LOG_LEVEL", "info (application default)")}`,
+    `ENABLE_SCENE_CLEANING: ${settingValue(
+      env,
+      "ENABLE_SCENE_CLEANING",
+      "false (disabled by default)",
+    )}`,
     `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID: ${settingValue(
       env,
       "TELEGRAM_RESTART_NOTIFICATION_CHAT_ID",

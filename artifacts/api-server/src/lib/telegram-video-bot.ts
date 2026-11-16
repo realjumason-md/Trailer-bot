@@ -1533,6 +1533,7 @@ async function runCompressionJob(
         job.child = child;
         if (job.cancelled && child) child.kill("SIGTERM");
       },
+      isCancelled: () => job.cancelled,
       onProgress: (progress: CompressionProgress) => {
         if (job.cancelled) return;
         const now = Date.now();
@@ -1574,7 +1575,7 @@ async function runCompressionJob(
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
-      `Compression finished (${result.width}×${result.height}). Original: ${formatBytes(pending.fileSize)} · compressed: ${formatBytes(result.outputBytes)}. Sending it to Telegram...`,
+      `Compression finished (${result.width}×${result.height}). Original: ${formatBytes(pending.fileSize)} · compressed: ${formatBytes(result.outputBytes)}.${result.removedSceneSeconds ? ` Removed ${result.removedSceneSeconds.toFixed(1)} seconds of frozen/blank scenes.` : ""} Sending it to Telegram...`,
     ).catch(() => undefined);
 
     await telegramCall(
@@ -1590,6 +1591,7 @@ async function runCompressionJob(
         caption: buildCompressionResultCaption(
           `Compressed to ${result.width}×${result.height} · original ${formatBytes(pending.fileSize)} → ${formatBytes(result.outputBytes)}`,
           pending.sourceUrl,
+          result.removedSceneSeconds,
         ),
         supports_streaming: true,
       },
@@ -1599,7 +1601,7 @@ async function runCompressionJob(
     await editMessage(
       pending.chatId,
       pending.statusMessageId,
-      `Done. The compressed video has been sent. Original: ${formatBytes(pending.fileSize)} · outcome: ${formatBytes(result.outputBytes)}.`,
+      `Done. The compressed video has been sent. Original: ${formatBytes(pending.fileSize)} · outcome: ${formatBytes(result.outputBytes)}.${result.removedSceneSeconds ? ` Removed ${result.removedSceneSeconds.toFixed(1)} seconds of frozen/blank scenes.` : ""}`,
     ).catch(() => undefined);
   } catch (error) {
     logger.warn(

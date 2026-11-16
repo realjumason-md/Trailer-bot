@@ -16,6 +16,7 @@ test("shows runtime values but never credential values", () => {
     PORT: "8080",
     NODE_ENV: "production",
     LOG_LEVEL: "warn",
+    ENABLE_SCENE_CLEANING: "true",
   };
 
   const message = buildRailwayDeploymentChecklist(env);
@@ -41,6 +42,7 @@ test("shows runtime values but never credential values", () => {
   assert.match(message, /PORT: 8080/);
   assert.match(message, /NODE_ENV: production/);
   assert.match(message, /LOG_LEVEL: warn/);
+  assert.match(message, /ENABLE_SCENE_CLEANING: true/);
   assert.match(message, /TELEGRAM_RESTART_NOTIFICATION_CHAT_ID: 123456789/);
 });
 
@@ -61,6 +63,7 @@ test("shows defaults and missing runtime values clearly", () => {
   assert.match(message, /PORT: \(not set; Railway normally supplies this\)/);
   assert.match(message, /NODE_ENV: \(not set\)/);
   assert.match(message, /LOG_LEVEL: info \(application default\)/);
+  assert.match(message, /ENABLE_SCENE_CLEANING: false \(disabled by default\)/);
   assert.match(message, /TELEGRAM_RESTART_NOTIFICATION_CHAT_ID: \(not set\)/);
   assert.match(message, /only one service should poll this bot token/);
 });

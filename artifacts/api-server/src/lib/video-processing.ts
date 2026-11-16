@@ -1,6 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { stat, unlink } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import {
+  buildSceneRemovalFilters,
+  createSceneRemovalPlan,
+  detectSceneIntervals,
+  SceneCleaningCancelledError,
+  type SceneRemovalPlan,
+} from "./scene-cleaning.ts";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_TELEGRAM_OUTPUT_BYTES = 1_900_000_000;
@@ -82,6 +89,7 @@ export type CompressionResult = {
   height: number;
   durationSeconds: number;
   outputBytes: number;
+  removedSceneSeconds?: number;
 };
 
 export type CompressionProgress = {
@@ -394,6 +402,7 @@ export async function compressVideo(options: {
   onProcess: (child: ChildProcess | null) => void;
   onVideoInfo: (info: VideoInfo) => void;
   onProgress: (progress: CompressionProgress) => void;
+  isCancelled?: () => boolean;
   maxProcessingTimeMs?: number;
 }): Promise<CompressionResult> {
   const maxProcessingTimeMs =
@@ -440,7 +449,76 @@ export async function compressVideo(options: {
     options.onProcess,
     Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
   );
-  options.onVideoInfo(info);
+  let sceneRemovalPlan: SceneRemovalPlan | null = null;
+  let sceneAudioFilter: string | null = null;
+  const sceneCleaningEnabled =
+    process.env["ENABLE_SCENE_CLEANING"]?.trim().toLowerCase() === "true";
+
+  if (sceneCleaningEnabled) {
+    try {
+      const candidates = await detectSceneIntervals({
+        inputPath,
+        videoDurationSeconds: info.durationSeconds,
+        timeoutMs: Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+        onProcess: options.onProcess,
+        isCancelled: options.isCancelled,
+      });
+      const candidatePlan = createSceneRemovalPlan(
+        candidates,
+        info.durationSeconds,
+      );
+      if (candidatePlan) {
+        const audioProbe = await runProcess(
+          "ffprobe",
+          [
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            inputPath,
+          ],
+          (child) => options.onProcess(child),
+          undefined,
+          Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+        );
+        sceneRemovalPlan = candidatePlan;
+        sceneAudioFilter = audioProbe.stdout.trim()
+          ? buildSceneRemovalFilters(candidatePlan.intervals).audio
+          : null;
+      }
+    } catch (error) {
+      if (
+        options.isCancelled?.() ||
+        error instanceof SceneCleaningCancelledError
+      ) {
+        throw new VideoProcessingError(
+          "Compression was cancelled.",
+          "cancelled",
+        );
+      }
+      if (Date.now() >= deadlineAt) {
+        throw new VideoProcessingError(
+          "Video processing took too long. Try a shorter video or lower resolution.",
+          "timeout",
+        );
+      }
+      // Detection is optional: any failure leaves the existing encode path intact.
+      sceneRemovalPlan = null;
+      sceneAudioFilter = null;
+    }
+  }
+
+  const compressionInfo = sceneRemovalPlan
+    ? {
+        ...info,
+        durationSeconds: info.durationSeconds - sceneRemovalPlan.removedSeconds,
+      }
+    : info;
+  options.onVideoInfo(compressionInfo);
   const dimensions = getOutputDimensions(
     info.width,
     info.height,
@@ -456,7 +534,21 @@ export async function compressVideo(options: {
     : ["-c:a", "aac", "-b:a", "128k", "-ac", "2"];
   let outputBytes = 0;
 
-  try {
+  const encodeAttempts = async (): Promise<number> => {
+    const attemptInfo = sceneRemovalPlan ? compressionInfo : info;
+    const sceneFilters = sceneRemovalPlan
+      ? buildSceneRemovalFilters(sceneRemovalPlan.intervals)
+      : null;
+    const videoFilter = sceneFilters
+      ? `${scaleFilter},${sceneFilters.video}`
+      : scaleFilter;
+    // Audio must be re-encoded only when its timeline is cut; the default path
+    // keeps the existing same-resolution audio-copy behavior.
+    const activeAudioCodecArgs = sceneRemovalPlan
+      ? ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+      : audioCodecArgs;
+    let encodedBytes = 0;
+
     for (let attempt = 0; attempt < crfLevels.length; attempt += 1) {
       const crf = crfLevels[attempt];
       await unlink(options.outputPath).catch(() => undefined);
@@ -476,7 +568,8 @@ export async function compressVideo(options: {
           "-map",
           "0:a?",
           "-vf",
-          scaleFilter,
+          videoFilter,
+          ...(sceneAudioFilter ? ["-af", sceneAudioFilter] : []),
           "-c:v",
           "libx264",
           "-preset",
@@ -487,7 +580,7 @@ export async function compressVideo(options: {
           "2",
           "-pix_fmt",
           "yuv420p",
-          ...audioCodecArgs,
+          ...activeAudioCodecArgs,
           "-movflags",
           "+faststart",
           "-progress",
@@ -497,46 +590,124 @@ export async function compressVideo(options: {
         ],
         (child) => options.onProcess(child),
         (seconds) => {
-          const attemptProgress = Math.min(1, seconds / info.durationSeconds);
+          const attemptProgress = Math.min(
+            1,
+            seconds / attemptInfo.durationSeconds,
+          );
           options.onProgress({
             attempt: attempt + 1,
             totalAttempts: crfLevels.length,
             fraction: attemptProgress,
-            videoSeconds: Math.min(info.durationSeconds, Math.max(0, seconds)),
-            durationSeconds: info.durationSeconds,
+            videoSeconds: Math.min(
+              attemptInfo.durationSeconds,
+              Math.max(0, seconds),
+            ),
+            durationSeconds: attemptInfo.durationSeconds,
           });
         },
         remainingProcessingTime(),
       );
 
-      outputBytes = (await stat(options.outputPath)).size;
+      encodedBytes = (await stat(options.outputPath)).size;
       if (
-        outputBytes < input.size &&
-        outputBytes <= MAX_TELEGRAM_OUTPUT_BYTES
+        encodedBytes < input.size &&
+        encodedBytes <= MAX_TELEGRAM_OUTPUT_BYTES
       ) {
         break;
       }
     }
 
-    if (outputBytes >= input.size) {
+    if (encodedBytes >= input.size) {
       throw new VideoProcessingError(
         "No smaller compressed file was found at this size. Try a lower resolution or custom size.",
         "output_not_smaller",
       );
     }
-    if (outputBytes > MAX_TELEGRAM_OUTPUT_BYTES) {
+    if (encodedBytes > MAX_TELEGRAM_OUTPUT_BYTES) {
       throw new VideoProcessingError(
         "The compressed video is still too large to send through Telegram. Try a lower resolution.",
         "output_too_large",
       );
     }
+    return encodedBytes;
+  };
+
+  try {
+    if (sceneRemovalPlan) {
+      try {
+        outputBytes = await encodeAttempts();
+      } catch (error) {
+        if (
+          error instanceof VideoProcessingError &&
+          (error.code === "cancelled" || error.code === "timeout")
+        ) {
+          throw error;
+        }
+        if (options.isCancelled?.()) {
+          throw new VideoProcessingError(
+            "Compression was cancelled.",
+            "cancelled",
+          );
+        }
+        if (Date.now() >= deadlineAt) {
+          throw new VideoProcessingError(
+            "Video processing took too long. Try a shorter video or lower resolution.",
+            "timeout",
+          );
+        }
+        // If FFmpeg cannot encode the filtered version, retry the original input.
+        sceneRemovalPlan = null;
+        sceneAudioFilter = null;
+        options.onVideoInfo(info);
+        outputBytes = await encodeAttempts();
+      }
+    } else {
+      outputBytes = await encodeAttempts();
+    }
 
     // Telegram may not infer metadata from local file:// uploads; probe the finished MP4.
-    const outputInfo = await probeVideo(
-      options.outputPath,
-      (child) => options.onProcess(child),
-      Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
-    );
+    let outputInfo: VideoInfo;
+    try {
+      outputInfo = await probeVideo(
+        options.outputPath,
+        (child) => options.onProcess(child),
+        Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+      );
+    } catch (error) {
+      if (
+        options.isCancelled?.() ||
+        (error instanceof VideoProcessingError && error.code === "cancelled")
+      ) {
+        throw new VideoProcessingError(
+          "Compression was cancelled.",
+          "cancelled",
+        );
+      }
+      if (!sceneRemovalPlan || Date.now() >= deadlineAt) throw error;
+      sceneRemovalPlan = null;
+      sceneAudioFilter = null;
+      options.onVideoInfo(info);
+      outputBytes = await encodeAttempts();
+      outputInfo = await probeVideo(
+        options.outputPath,
+        (child) => options.onProcess(child),
+        Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+      );
+    }
+
+    // Be stricter than the 3-second floor to absorb timestamp rounding, and
+    // fall back to the original if the encoded result somehow crosses the floor.
+    if (sceneRemovalPlan && outputInfo.durationSeconds < 3) {
+      sceneRemovalPlan = null;
+      sceneAudioFilter = null;
+      options.onVideoInfo(info);
+      outputBytes = await encodeAttempts();
+      outputInfo = await probeVideo(
+        options.outputPath,
+        (child) => options.onProcess(child),
+        Math.min(MAX_PROBE_DURATION_MS, remainingProcessingTime()),
+      );
+    }
 
     return {
       outputPath: options.outputPath,
@@ -544,6 +715,9 @@ export async function compressVideo(options: {
       height: outputInfo.height,
       durationSeconds: outputInfo.durationSeconds,
       outputBytes,
+      ...(sceneRemovalPlan
+        ? { removedSceneSeconds: sceneRemovalPlan.removedSeconds }
+        : {}),
     };
   } catch (error) {
     await unlink(options.outputPath).catch(() => undefined);
