@@ -28,3 +28,14 @@ test("uses the replied-to source message for very long links", () => {
     `${baseCaption}\nSource: original link message`,
   );
 });
+
+test("adds a scene-cleaning note only when scenes were removed", () => {
+  assert.equal(
+    buildCompressionResultCaption(baseCaption, undefined, 2.84),
+    `${baseCaption}\nRemoved 2.8 seconds of frozen/blank scenes\nSource: original video message`,
+  );
+  assert.equal(
+    buildCompressionResultCaption(baseCaption, undefined, 0),
+    `${baseCaption}\nSource: original video message`,
+  );
+});
