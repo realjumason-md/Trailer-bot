@@ -17,9 +17,7 @@ export function isCompletePartialResponse(
   if (statusCode !== 206 || !contentRange) return false;
   const match = contentRange.match(/^bytes\s+0-(\d+)\/(\d+)$/i);
   return Boolean(
-    match &&
-      Number(match[1]) + 1 === Number(match[2]) &&
-      Number(match[2]) > 0,
+    match && Number(match[1]) + 1 === Number(match[2]) && Number(match[2]) > 0,
   );
 }
 
@@ -37,6 +35,19 @@ export function findHttpUrl(text: string): string | null {
     }
   }
   return null;
+}
+
+export function isZipArchiveUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.toLowerCase().replace(/\/+$/u, "");
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      pathname.endsWith(".zip")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export class RemoteVideoDownloadError extends Error {
@@ -393,7 +404,7 @@ async function downloadRedirects(
       ? declaredSize
       : completePartialResponse
         ? Number(response.headers["content-range"]?.match(/\/(\d+)$/)?.[1])
-      : undefined;
+        : undefined;
   let downloadedBytes = 0;
   let initialBytes = Buffer.alloc(0);
   const progressStream = new Transform({

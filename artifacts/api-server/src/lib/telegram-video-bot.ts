@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rmdir, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,14 +29,9 @@ import {
 import {
   downloadRemoteVideo,
   findHttpUrl,
+  isZipArchiveUrl,
   RemoteVideoDownloadError,
 } from "./remote-video-download";
-import {
-  extractVideoFromZip,
-  isZipArchive,
-  VideoArchiveError,
-  videoArchiveFailureMessage,
-} from "./video-archive";
 import {
   downloadTikTokVideo,
   downloadPublicSiteVideo,
@@ -691,6 +686,14 @@ async function prepareVideoFromUrl(
   url: string,
   source: "url" | "tiktok" = "url",
 ): Promise<void> {
+  if (source === "url" && isZipArchiveUrl(url)) {
+    await sendMessage(
+      message.chat.id,
+      "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
+    );
+    return;
+  }
+
   const userId = message.from?.id;
   if (userId == null) return;
   const key = makeSessionKey(message.chat.id, userId);
@@ -762,7 +765,7 @@ async function prepareVideoFromUrl(
         onProgress: (bytes, totalBytes) =>
           reportDownloadProgress(bytes, totalBytes),
       });
-    let downloadedBytes =
+    const downloadedBytes =
       source === "tiktok"
         ? await downloadTikTokVideo(url, inputPath, {
             maxBytes: videoLimits.maxInputBytes,
@@ -789,32 +792,6 @@ async function prepareVideoFromUrl(
               }
               return downloadWithYtDlp();
             });
-
-    let extractedArchiveFileName: string | undefined;
-    if (source !== "tiktok" && (await isZipArchive(inputPath))) {
-      progressActivity = `Extracting ${siteName} archive`;
-      lastProgressAt = Date.now();
-      lastProgressPercent = -10;
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        `Downloaded ${formatBytes(downloadedBytes)} from ${siteName}. Extracting the video from the ZIP archive now.`,
-      ).catch(() => undefined);
-      const extractedPath = `${inputPath}.extracted`;
-      const extracted = await extractVideoFromZip(inputPath, extractedPath, {
-        maxBytes: videoLimits.maxInputBytes,
-        signal: abortController.signal,
-        onProgress: (bytes, totalBytes) =>
-          reportDownloadProgress(bytes, totalBytes),
-      });
-      if (preparation.cancelled || abortController.signal.aborted) {
-        await unlink(extractedPath).catch(() => undefined);
-        throw new VideoArchiveError("cancelled");
-      }
-      await rename(extractedPath, inputPath);
-      downloadedBytes = extracted.fileSize;
-      extractedArchiveFileName = extracted.fileName;
-    }
 
     if (preparation.cancelled) {
       await unlink(inputPath).catch(() => undefined);
@@ -858,7 +835,7 @@ async function prepareVideoFromUrl(
     const fileName =
       source === "tiktok"
         ? "tiktok-video.mp4"
-        : (extractedArchiveFileName ?? path.basename(parsedUrl.pathname));
+        : path.basename(parsedUrl.pathname);
     const pending: PendingVideo = {
       id,
       key,
@@ -919,13 +896,11 @@ async function prepareVideoFromUrl(
         ? source === "tiktok"
           ? tiktokFailureMessage(error)
           : publicVideoFailureMessage(error, siteName)
-        : error instanceof VideoArchiveError
-          ? videoArchiveFailureMessage(error)
-          : error instanceof VideoProcessingError
+        : error instanceof VideoProcessingError
+          ? error.message
+          : error instanceof RemoteVideoDownloadError
             ? error.message
-            : error instanceof RemoteVideoDownloadError
-              ? error.message
-              : "I couldn’t download that video link. Check it and try again.";
+            : "I couldn’t download that video link. Check it and try again.";
     if (preparation.statusMessageId != null) {
       await editMessage(
         message.chat.id,
@@ -1040,8 +1015,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, paste a direct public video-file or ZIP link, or send a public video page link from a supported site.",
-        "A ZIP link must contain a supported video under 4 GB. The bot extracts the largest video in the archive; password-protected archives are not supported.",
+        "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
+        "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
         "Public page extraction uses yt-dlp. Common examples include YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo, but support varies by site and extractor version. Direct HLS/DASH manifest links are handled by yt-dlp.",
         "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
         "Some sites temporarily rate-limit downloads or change their extractors. The bot reports those separately from login-required, geo-restricted, and unsupported pages.",
