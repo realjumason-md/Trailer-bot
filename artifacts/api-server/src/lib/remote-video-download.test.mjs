@@ -7,6 +7,7 @@ import {
   downloadRemoteVideo,
   findHttpUrl,
   isCompletePartialResponse,
+  isZipArchiveUrl,
   RemoteVideoDownloadError,
 } from "./remote-video-download.ts";
 
@@ -46,6 +47,17 @@ test("finds an HTTP video URL surrounded by text or Markdown", () => {
 test("ignores non-web and malformed links when extracting URLs", () => {
   assert.equal(findHttpUrl("file:///tmp/video.mp4"), null);
   assert.equal(findHttpUrl("There is no video link here."), null);
+});
+
+test("recognizes ZIP archive links, including query strings and trailing slashes", () => {
+  assert.equal(
+    isZipArchiveUrl("https://cdn.example/clip.ZIP?token=private"),
+    true,
+  );
+  assert.equal(isZipArchiveUrl("https://cdn.example/clip.zip/"), true);
+  assert.equal(isZipArchiveUrl("https://cdn.example/clip.zip.mp4"), false);
+  assert.equal(isZipArchiveUrl("https://cdn.example/clip.mp4"), false);
+  assert.equal(isZipArchiveUrl("file:///tmp/clip.zip"), false);
 });
 
 test("rejects localhost and private-network download URLs before connecting", async () => {

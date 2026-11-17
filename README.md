@@ -71,7 +71,7 @@ above.
 Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot API server and installs FFmpeg, `ffprobe`, and yt-dlp, so the service does not depend on packages preinstalled in the Railway image. Without a volume, the bot stores working files under `/tmp/telegram-video-bot`; set `BOT_DATA_DIR` to `/data/telegram-video-bot` when using the persistent volume below.
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
-2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video, compressed output, and—when using a ZIP link—the downloaded archive during extraction.
+2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video and compressed output.
 3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To enable optional scene cleaning, set `ENABLE_SCENE_CLEANING=true`; it is disabled when unset or false. To receive restart messages, also set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from `/chatid`. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
 4. Set the Railway healthcheck path to `/api/healthz` and keep the service to one replica. This bot uses long polling and keeps queue state in process memory; a restart cancels in-flight jobs instead of resuming them.
 5. If this bot is being moved from Telegram's hosted Bot API for the first time, call `logOut` once before starting this service. Do not call it on routine restarts or redeploys.
@@ -88,7 +88,7 @@ For supported sites that require an authenticated session, export a Netscape-for
 
 - Accepts video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links to video files up to 4 GB.
-- Accepts public ZIP links containing supported video files up to 4 GB. It extracts the largest supported video to a fixed temporary path, rejects password-protected archives, and limits extreme expansion ratios.
+- ZIP archives are not supported. Extract videos before sending or linking them.
 - Uses yt-dlp for public HLS/DASH manifests and supported video pages, including common extractors for YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo. Coverage changes with site behavior and yt-dlp versions; this is not support for every website.
 - Prefers MP4 video/audio formats when available and merges separate streams. Progress includes yt-dlp download progress plus output-size monitoring. Login-required, geo-restricted, rate-limited, unsupported, inaccessible, and DRM-protected sources have distinct user-facing outcomes.
 - A configured Netscape cookies file can be used only for content the associated account is allowed to view. Private or login-only content may still be inaccessible, and DRM-protected media remains unsupported.
