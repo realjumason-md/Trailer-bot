@@ -7,12 +7,7 @@ test("keeps a pending resolution choice through a long compression backlog", () 
   let expiresAt = 30 * 60 * 1_000;
 
   for (let now = expiresAt + 1; now < 3 * 60 * 60 * 1_000; now += 60_000) {
-    const nextExpiry = getNextPendingVideoExpiry(
-      expiresAt,
-      now,
-      ttlMs,
-      true,
-    );
+    const nextExpiry = getNextPendingVideoExpiry(expiresAt, now, ttlMs, true);
     assert.notEqual(nextExpiry, null);
     expiresAt = nextExpiry;
   }

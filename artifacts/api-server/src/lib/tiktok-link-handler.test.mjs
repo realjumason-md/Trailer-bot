@@ -370,7 +370,11 @@ test("limits user-facing errors to safe messages", () => {
       new TikTokDownloadError("access-denied"),
       "Google Cloud Storage",
     ),
-    /Google Cloud Storage.*refused public access/i,
+    /Google Cloud Storage.*denied to the bot's server/i,
+  );
+  assert.match(
+    publicVideoFailureMessage(new TikTokDownloadError("access-denied")),
+    /browser or download app.*upload the video/i,
   );
   assert.doesNotMatch(
     publicVideoFailureMessage(new Error("extractor output with private data")),

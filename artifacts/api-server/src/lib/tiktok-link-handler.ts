@@ -233,7 +233,7 @@ export function publicVideoFailureMessage(
     case "drm-protected":
       return "This video is DRM-protected, which the bot does not support.";
     case "access-denied":
-      return `The ${pageLabel} link refused public access or the video is no longer available. Check that the link can be opened without signing in.`;
+      return `The ${pageLabel} link was denied to the bot's server or has expired. It may still work in a browser or download app. Use a link the host permits for server downloads, or upload the video.`;
     case "extractor-missing":
       return `yt-dlp does not currently recognize a supported extractor for that ${pageLabel}.`;
     case "rate-limited":

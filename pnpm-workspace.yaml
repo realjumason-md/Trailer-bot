@@ -41,7 +41,7 @@ packages:
 
 catalog:
   "@types/node": ^25.3.3
-  zod: ^3.25.76
+  zod: ^4.6.6
 
 autoInstallPeers: false
 

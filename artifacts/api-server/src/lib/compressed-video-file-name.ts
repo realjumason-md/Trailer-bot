@@ -6,8 +6,7 @@ export function compressedVideoFileName(sourceName?: string | null): string {
     .trim()
     .replace(/[. ]+$/u, "");
   const extensionIndex = cleaned.lastIndexOf(".");
-  const stem =
-    extensionIndex > 0 ? cleaned.slice(0, extensionIndex) : cleaned;
+  const stem = extensionIndex > 0 ? cleaned.slice(0, extensionIndex) : cleaned;
   const safeStem = Array.from(stem.replace(/^[. ]+/u, "").trim())
     .slice(0, 120)
     .join("")
