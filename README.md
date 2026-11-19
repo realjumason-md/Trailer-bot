@@ -20,7 +20,9 @@ Required environment variables:
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 
-To receive a message after each successful bot startup, open a private chat with the bot, send `/start` and `/chatid`, then set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the returned ID in the local environment or Railway. The bot must have been started in that chat before Telegram allows it to send a message. A notification failure is logged and does not prevent the bot from starting.
+To receive a message after each successful bot startup, open a private chat with the bot, send `/start` and `/chatid`, then set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the returned ID in the local environment or Railway. This configured private chat is also the only chat that can use the owner inbox. The bot must have been started in that chat before Telegram allows it to send a message. A notification failure is logged and does not prevent the bot from starting.
+
+When the owner inbox is enabled, the bot records up to 1,000 recent messages from other private chats (text/captions up to 4,096 characters and basic sender/attachment details) so the owner can review and reply. It does not copy media files into the inbox. Users see this notice in `/start` and `/help`; avoid sending sensitive information to the bot.
 
 Scene cleaning is optional and disabled by default. Set `ENABLE_SCENE_CLEANING=true` in the local environment or Railway to automatically remove detected freezes longer than 0.6 seconds and solid-black scenes longer than 0.5 seconds. It never removes more than 25% of the source duration or trims the result below 3 seconds; if detection or filtered encoding fails, compression falls back to the original video.
 
@@ -72,11 +74,11 @@ Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot 
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
 2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; size it for the input video and compressed output.
-3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To enable optional scene cleaning, set `ENABLE_SCENE_CLEANING=true`; it is disabled when unset or false. To receive restart messages, also set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from `/chatid`. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
+3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To enable optional scene cleaning, set `ENABLE_SCENE_CLEANING=true`; it is disabled when unset or false. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from `/chatid` to receive restart messages and enable the owner-only inbox. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
 4. Set the Railway healthcheck path to `/api/healthz` and keep the service to one replica. This bot uses long polling and keeps queue state in process memory; a restart cancels in-flight jobs instead of resuming them.
 5. If this bot is being moved from Telegram's hosted Bot API for the first time, call `logOut` once before starting this service. Do not call it on routine restarts or redeploys.
 
-In the configured private chat, `/railwayvars` shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by `/chatid`; the command is disabled until that ID is valid and only that private chat can use it. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
+In the configured private chat, `/railwayvars` shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Use the persistent **Open inbox** button to browse users, view recent message excerpts, and reply with buttons; it appears only in the configured owner chat. Inbox history is stored in `BOT_DATA_DIR/telegram-inbox.json` and capped at 1,000 messages. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by `/chatid`; owner features are disabled until that ID is valid and only that private chat can use them. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
 
@@ -107,6 +109,7 @@ For supported sites that require an authenticated session, export a Netscape-for
 ## Source layout
 
 - `artifacts/api-server/src/lib/telegram-video-bot.ts` — Telegram polling, upload handling, resolution selection, status, and cancellation.
+- `artifacts/api-server/src/lib/telegram-inbox.ts` — capped, persistent private-message history for owner support replies.
 - `artifacts/api-server/src/lib/video-processing.ts` — video probing, FFmpeg compression, and measured progress.
 - `lib/api-zod` — the health-response schema used by the server.
 - `lib/api-spec` — the OpenAPI source and generator for `lib/api-zod`.
