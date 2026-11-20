@@ -500,8 +500,14 @@ async function prepareVideo(
   const key = makeSessionKey(message.chat.id, userId);
   if (!canPrepareAnotherVideo(message.chat.id)) return;
 
-  if (file.file_size != null && file.file_size > videoLimits.maxInputBytes) {
-    await sendMessage(message.chat.id, "This bot accepts videos up to 4 GB.");
+  if (
+    file.file_size != null &&
+    file.file_size > videoLimits.maxTelegramUploadBytes
+  ) {
+    await sendMessage(
+      message.chat.id,
+      `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
+    );
     return;
   }
   if (!canSubmitVideo(message.chat.id, userId)) return;
@@ -609,11 +615,11 @@ async function prepareVideo(
       );
       return;
     }
-    if (localFile.size > videoLimits.maxInputBytes) {
+    if (localFile.size > videoLimits.maxTelegramUploadBytes) {
       await editMessage(
         message.chat.id,
         status.message_id,
-        "This bot accepts videos up to 4 GB.",
+        `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
       );
       return;
     }
@@ -749,7 +755,7 @@ async function prepareVideoFromUrl(
       message.chat.id,
       source === "tiktok"
         ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
-        : `Preparing this public ${siteName} video link (maximum 4 GB). You’ll choose an output resolution when the video is ready.`,
+        : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). You’ll choose an output resolution when the video is ready.`,
     );
     preparation.statusMessageId = status.message_id;
 
@@ -812,7 +818,7 @@ async function prepareVideoFromUrl(
               if (
                 abortController.signal.aborted ||
                 (error instanceof RemoteVideoDownloadError &&
-                  /4 GB/u.test(error.message))
+                  error.code === "input_too_large")
               ) {
                 throw error;
               }
@@ -835,7 +841,10 @@ async function prepareVideoFromUrl(
       );
     }
     if (localFile.size > videoLimits.maxInputBytes) {
-      throw new RemoteVideoDownloadError("This bot accepts videos up to 4 GB.");
+      throw new RemoteVideoDownloadError(
+        `This bot accepts linked videos up to ${videoLimits.maxInputSizeLabel}.`,
+        "input_too_large",
+      );
     }
 
     preparation.fileSize = localFile.size;
@@ -1382,7 +1391,7 @@ async function handleMessage(
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
+        `Send me a Telegram video upload up to ${videoLimits.maxTelegramUploadSizeLabel}, paste a direct public video-file link up to ${videoLimits.maxInputSizeLabel}, or send a supported public video page link up to ${videoLimits.maxInputSizeLabel}.`,
         "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
         "Public page extraction uses yt-dlp. Common examples include YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo, but support varies by site and extractor version. Direct HLS/DASH manifest links are handled by yt-dlp.",
         "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
@@ -1853,7 +1862,7 @@ async function runCompressionJob(
     }
     if (sourceStat.size > videoLimits.maxInputBytes) {
       throw new VideoProcessingError(
-        "This video is larger than the 4 GB limit.",
+        `This video exceeds the ${videoLimits.maxInputSizeLabel} processing limit.`,
         "input_too_large",
       );
     }

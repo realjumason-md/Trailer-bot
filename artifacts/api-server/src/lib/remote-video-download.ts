@@ -6,6 +6,7 @@ import { unlink } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { request as httpsRequest } from "node:https";
+import { VIDEO_INPUT_LIMIT_LABEL } from "./video-limits.ts";
 
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -51,9 +52,12 @@ export function isZipArchiveUrl(value: string): boolean {
 }
 
 export class RemoteVideoDownloadError extends Error {
-  constructor(message: string) {
+  readonly code: "input_too_large" | undefined;
+
+  constructor(message: string, code?: "input_too_large") {
     super(message);
     this.name = "RemoteVideoDownloadError";
+    this.code = code;
   }
 }
 
@@ -397,7 +401,10 @@ async function downloadRedirects(
   const declaredSize = Number(response.headers["content-length"]);
   if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
     response.destroy();
-    throw new RemoteVideoDownloadError("This bot accepts videos up to 4 GB.");
+    throw new RemoteVideoDownloadError(
+      `This bot accepts linked videos up to ${VIDEO_INPUT_LIMIT_LABEL}.`,
+      "input_too_large",
+    );
   }
   const totalBytes =
     Number.isFinite(declaredSize) && declaredSize >= 0
@@ -412,7 +419,10 @@ async function downloadRedirects(
       downloadedBytes += chunk.length;
       if (downloadedBytes > maxBytes) {
         callback(
-          new RemoteVideoDownloadError("This bot accepts videos up to 4 GB."),
+          new RemoteVideoDownloadError(
+            `This bot accepts linked videos up to ${VIDEO_INPUT_LIMIT_LABEL}.`,
+            "input_too_large",
+          ),
         );
         return;
       }
