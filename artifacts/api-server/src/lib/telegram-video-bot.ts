@@ -23,6 +23,11 @@ import {
 } from "./video-submission-limits";
 import { parseRestartNotificationChatId } from "./restart-notification";
 import {
+  MAX_TELEGRAM_INBOX_MESSAGES,
+  TelegramInboxStore,
+  type TelegramInboxMessage,
+} from "./telegram-inbox";
+import {
   buildRailwayDeploymentChecklist,
   isAuthorizedRailwayVarsChat,
 } from "./railway-deployment-checklist";
@@ -114,11 +119,24 @@ type TelegramChat = {
 
 type TelegramMessage = {
   message_id: number;
+  date?: number;
   chat: TelegramChat;
   from?: TelegramUser;
   text?: string;
+  caption?: string;
+  reply_to_message?: { message_id: number };
   video?: TelegramFile;
   document?: TelegramFile;
+  animation?: TelegramFile;
+  audio?: TelegramFile;
+  voice?: TelegramFile;
+  video_note?: TelegramFile;
+  photo?: TelegramFile[];
+  sticker?: TelegramFile;
+  contact?: unknown;
+  location?: unknown;
+  venue?: unknown;
+  poll?: unknown;
 };
 
 type TelegramCallbackQuery = {
@@ -202,6 +220,14 @@ const BOT_DATA_DIR = path.resolve(
 const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
 const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
 const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
+const telegramInbox = new TelegramInboxStore(
+  path.join(BOT_DATA_DIR, "telegram-inbox.json"),
+);
+const pendingInboxReplies = new Map<
+  number,
+  { userId: number; promptMessageId: number }
+>();
+const INBOX_USERS_PER_PAGE = 8;
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 const JOB_ARTIFACT_CLEANUP_INTERVAL_MS = 30 * 60 * 1_000;
@@ -474,8 +500,14 @@ async function prepareVideo(
   const key = makeSessionKey(message.chat.id, userId);
   if (!canPrepareAnotherVideo(message.chat.id)) return;
 
-  if (file.file_size != null && file.file_size > videoLimits.maxInputBytes) {
-    await sendMessage(message.chat.id, "This bot accepts videos up to 4 GB.");
+  if (
+    file.file_size != null &&
+    file.file_size > videoLimits.maxTelegramUploadBytes
+  ) {
+    await sendMessage(
+      message.chat.id,
+      `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
+    );
     return;
   }
   if (!canSubmitVideo(message.chat.id, userId)) return;
@@ -583,11 +615,11 @@ async function prepareVideo(
       );
       return;
     }
-    if (localFile.size > videoLimits.maxInputBytes) {
+    if (localFile.size > videoLimits.maxTelegramUploadBytes) {
       await editMessage(
         message.chat.id,
         status.message_id,
-        "This bot accepts videos up to 4 GB.",
+        `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
       );
       return;
     }
@@ -723,7 +755,7 @@ async function prepareVideoFromUrl(
       message.chat.id,
       source === "tiktok"
         ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
-        : `Preparing this public ${siteName} video link (maximum 4 GB). You’ll choose an output resolution when the video is ready.`,
+        : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). You’ll choose an output resolution when the video is ready.`,
     );
     preparation.statusMessageId = status.message_id;
 
@@ -786,7 +818,7 @@ async function prepareVideoFromUrl(
               if (
                 abortController.signal.aborted ||
                 (error instanceof RemoteVideoDownloadError &&
-                  /4 GB/u.test(error.message))
+                  error.code === "input_too_large")
               ) {
                 throw error;
               }
@@ -809,7 +841,10 @@ async function prepareVideoFromUrl(
       );
     }
     if (localFile.size > videoLimits.maxInputBytes) {
-      throw new RemoteVideoDownloadError("This bot accepts videos up to 4 GB.");
+      throw new RemoteVideoDownloadError(
+        `This bot accepts linked videos up to ${videoLimits.maxInputSizeLabel}.`,
+        "input_too_large",
+      );
     }
 
     preparation.fileSize = localFile.size;
@@ -1007,15 +1042,356 @@ function isVideoFile(file: TelegramFile | undefined): file is TelegramFile {
   );
 }
 
-async function handleMessage(message: TelegramMessage): Promise<void> {
+function isOwnerInboxChat(
+  chatType: string | undefined,
+  chatId: number,
+): boolean {
+  return isAuthorizedRailwayVarsChat(
+    chatType,
+    chatId,
+    process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
+  );
+}
+
+function ownerInboxKeyboard(): Record<string, unknown> {
+  return {
+    keyboard: [[{ text: "📥 Open inbox" }]],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function inboxHomeKeyboard(): Record<string, unknown> {
+  const userCount = telegramInbox.listUsers(MAX_TELEGRAM_INBOX_MESSAGES).length;
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: `👥 Users (${userCount})`,
+          callback_data: "inbox:users:0",
+        },
+      ],
+    ],
+  };
+}
+
+function inboxHomeText(): string {
+  return [
+    "Owner inbox",
+    "",
+    "Browse recent private-chat users, view their messages, and reply from here.",
+    `The inbox keeps up to ${MAX_TELEGRAM_INBOX_MESSAGES} recent messages.`,
+  ].join("\n");
+}
+
+function inboxUserLabel(user: {
+  firstName: string;
+  username?: string;
+}): string {
+  return (user.username ? `@${user.username}` : user.firstName)
+    .replace(/\s+/gu, " ")
+    .slice(0, 40);
+}
+
+function inboxUsersScreen(page: number): {
+  text: string;
+  replyMarkup: Record<string, unknown>;
+} {
+  const allUsers = telegramInbox.listUsers(MAX_TELEGRAM_INBOX_MESSAGES);
+  const pageCount = Math.max(
+    1,
+    Math.ceil(allUsers.length / INBOX_USERS_PER_PAGE),
+  );
+  const selectedPage = Math.min(Math.max(0, page), pageCount - 1);
+  const users = allUsers.slice(
+    selectedPage * INBOX_USERS_PER_PAGE,
+    (selectedPage + 1) * INBOX_USERS_PER_PAGE,
+  );
+  const rows = users.map((user) => [
+    {
+      text: `${inboxUserLabel(user)} · ${user.messageCount}`,
+      callback_data: `inbox:user:${user.userId}:${selectedPage}`,
+    },
+  ]);
+  const navigation = [];
+  if (selectedPage > 0) {
+    navigation.push({
+      text: "◀ Previous",
+      callback_data: `inbox:users:${selectedPage - 1}`,
+    });
+  }
+  if (selectedPage + 1 < pageCount) {
+    navigation.push({
+      text: "Next ▶",
+      callback_data: `inbox:users:${selectedPage + 1}`,
+    });
+  }
+  if (navigation.length > 0) rows.push(navigation);
+  rows.push([{ text: "Inbox menu", callback_data: "inbox:home" }]);
+
+  return {
+    text:
+      allUsers.length === 0
+        ? "No recent private-chat users have messaged the bot yet."
+        : `Recent users · page ${selectedPage + 1}/${pageCount}\nSelect a user to view recent messages and reply.\n\n${allUsers.length} user(s) in the latest ${MAX_TELEGRAM_INBOX_MESSAGES} messages.`,
+    replyMarkup: { inline_keyboard: rows },
+  };
+}
+
+function formatInboxTimestamp(timestamp: number): string {
+  return `${new Date(timestamp).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function formatInboxUser(user: {
+  userId: number;
+  firstName: string;
+  username?: string;
+  messageCount: number;
+  lastMessageAt: number;
+}): string {
+  const handle = inboxUserLabel(user);
+  return `${handle} · ID ${user.userId} · ${user.messageCount} message(s) · last seen ${formatInboxTimestamp(user.lastMessageAt)}`;
+}
+
+function inboxUserScreen(
+  userId: number,
+  page: number,
+): { text: string; replyMarkup: Record<string, unknown> } | null {
+  const user = telegramInbox.getUser(userId);
+  if (!user) return null;
+  const messages = telegramInbox.getMessages(userId, 5);
+  const conversation = messages.map((entry) => {
+    const fileDetails = [
+      entry.fileName,
+      entry.fileSize == null ? undefined : formatBytes(entry.fileSize),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const content = entry.text.replace(/\s+/gu, " ").slice(0, 450);
+    const details = [fileDetails, content].filter(Boolean).join(" — ");
+    return `${formatInboxTimestamp(entry.receivedAt)} · ${entry.contentType}${details ? ` · ${details}` : ""}`;
+  });
+
+  return {
+    text: `${formatInboxUser(user)}\n\nRecent messages (latest 5; long text is shortened):\n${conversation.join("\n\n") || "No messages saved."}`,
+    replyMarkup: {
+      inline_keyboard: [
+        [
+          {
+            text: "↩ Reply",
+            callback_data: `inbox:reply:${user.userId}`,
+          },
+        ],
+        [
+          {
+            text: "◀ Back to users",
+            callback_data: `inbox:users:${page}`,
+          },
+          { text: "Inbox menu", callback_data: "inbox:home" },
+        ],
+      ],
+    },
+  };
+}
+
+async function handleInboxCallback(
+  callback: TelegramCallbackQuery,
+): Promise<void> {
+  const message = callback.message;
+  if (
+    !message ||
+    !isOwnerInboxChat(message.chat.type, message.chat.id) ||
+    callback.from.id !== message.chat.id
+  ) {
+    await answerCallback(callback.id, "Owner inbox only.");
+    return;
+  }
+
+  const data = callback.data ?? "";
+  if (data === "inbox:home") {
+    await answerCallback(callback.id);
+    await editMessage(
+      message.chat.id,
+      message.message_id,
+      inboxHomeText(),
+      inboxHomeKeyboard(),
+    );
+    return;
+  }
+
+  const usersMatch = data.match(/^inbox:users:(\d+)$/u);
+  if (usersMatch) {
+    const screen = inboxUsersScreen(Number(usersMatch[1]));
+    await answerCallback(callback.id);
+    await editMessage(
+      message.chat.id,
+      message.message_id,
+      screen.text,
+      screen.replyMarkup,
+    );
+    return;
+  }
+
+  const userMatch = data.match(/^inbox:user:(\d+):(\d+)$/u);
+  if (userMatch) {
+    const screen = inboxUserScreen(Number(userMatch[1]), Number(userMatch[2]));
+    await answerCallback(
+      callback.id,
+      screen
+        ? undefined
+        : "That user's recent messages are no longer available.",
+    );
+    if (screen) {
+      await editMessage(
+        message.chat.id,
+        message.message_id,
+        screen.text,
+        screen.replyMarkup,
+      );
+    }
+    return;
+  }
+
+  const replyMatch = data.match(/^inbox:reply:(\d+)$/u);
+  if (replyMatch) {
+    const user = telegramInbox.getUser(Number(replyMatch[1]));
+    if (!user) {
+      await answerCallback(callback.id, "That user is no longer in the inbox.");
+      return;
+    }
+    await answerCallback(callback.id);
+    const prompt = await sendMessage(
+      message.chat.id,
+      `Reply to ${inboxUserLabel(user)}. Type your response as a reply to this prompt.`,
+      {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: "Type your reply",
+      },
+    );
+    pendingInboxReplies.set(message.chat.id, {
+      userId: user.userId,
+      promptMessageId: prompt.message_id,
+    });
+    return;
+  }
+
+  await answerCallback(
+    callback.id,
+    "That inbox button is no longer available.",
+  );
+}
+
+async function handleMessage(
+  message: TelegramMessage,
+  updateId: number,
+): Promise<void> {
   const text = message.text?.trim();
   const userId = message.from?.id;
+  const replyState = pendingInboxReplies.get(message.chat.id);
+  if (
+    replyState &&
+    isOwnerInboxChat(message.chat.type, message.chat.id) &&
+    message.reply_to_message?.message_id === replyState.promptMessageId
+  ) {
+    pendingInboxReplies.delete(message.chat.id);
+    const targetUser = telegramInbox.getUser(replyState.userId);
+    if (!text || !targetUser) {
+      await sendMessage(
+        message.chat.id,
+        "That reply could not be sent. Open the user's messages and try again.",
+      );
+      return;
+    }
+    try {
+      await sendMessage(targetUser.chatId, text);
+      await sendMessage(
+        message.chat.id,
+        `Reply sent to ${inboxUserLabel(targetUser)}.`,
+      );
+    } catch {
+      await sendMessage(
+        message.chat.id,
+        "Telegram could not deliver that reply. The user may have blocked the bot.",
+      );
+    }
+    return;
+  }
+
+  if (text === "📥 Open inbox") {
+    if (!isOwnerInboxChat(message.chat.type, message.chat.id)) {
+      await sendMessage(
+        message.chat.id,
+        "The owner inbox is available only in the configured private chat.",
+      );
+      return;
+    }
+    await sendMessage(message.chat.id, inboxHomeText(), inboxHomeKeyboard());
+    return;
+  }
+
+  const configuredOwnerChatId = parseRestartNotificationChatId(
+    process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
+  );
+  const isIntroCommand = /^\/(?:start|help)(?:@\w+)?(?:\s|$)/iu.test(
+    text ?? "",
+  );
+  if (
+    message.chat.type === "private" &&
+    userId != null &&
+    configuredOwnerChatId != null &&
+    message.chat.id !== configuredOwnerChatId &&
+    !isIntroCommand
+  ) {
+    const file =
+      message.video ??
+      message.document ??
+      message.animation ??
+      message.audio ??
+      message.voice ??
+      message.video_note ??
+      message.sticker ??
+      message.photo?.at(-1);
+    let contentType = "other";
+    if (message.video || isVideoFile(message.document)) contentType = "video";
+    else if (message.animation) contentType = "animation";
+    else if (message.document) contentType = "document";
+    else if (message.photo) contentType = "photo";
+    else if (message.audio) contentType = "audio";
+    else if (message.voice) contentType = "voice";
+    else if (message.video_note) contentType = "video note";
+    else if (message.sticker) contentType = "sticker";
+    else if (message.contact) contentType = "contact";
+    else if (message.location || message.venue) contentType = "location";
+    else if (message.poll) contentType = "poll";
+    else if (message.text) contentType = "text";
+
+    await telegramInbox
+      .record({
+        updateId,
+        userId,
+        chatId: message.chat.id,
+        firstName: message.from?.first_name ?? "Unknown user",
+        ...(message.from?.username ? { username: message.from.username } : {}),
+        contentType,
+        text: message.text ?? message.caption ?? "",
+        ...(file?.file_name ? { fileName: file.file_name } : {}),
+        ...(file?.file_size != null ? { fileSize: file.file_size } : {}),
+        receivedAt: message.date == null ? Date.now() : message.date * 1_000,
+      })
+      .catch((error: unknown) => {
+        logger.warn(
+          { code: errorName(error) },
+          "Could not save a message to the owner inbox",
+        );
+      });
+  }
 
   if (text?.startsWith("/start") || text?.startsWith("/help")) {
     await sendMessage(
       message.chat.id,
       [
-        "Send me a video up to 4 GB, paste a direct public video-file link, or send a public video page link from a supported site.",
+        `Send me a Telegram video upload up to ${videoLimits.maxTelegramUploadSizeLabel}, paste a direct public video-file link up to ${videoLimits.maxInputSizeLabel}, or send a supported public video page link up to ${videoLimits.maxInputSizeLabel}.`,
         "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
         "Public page extraction uses yt-dlp. Common examples include YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo, but support varies by site and extractor version. Direct HLS/DASH manifest links are handled by yt-dlp.",
         "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
@@ -1027,9 +1403,16 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         `Compression is one video at a time; up to ${MAX_WAITING_COMPRESSIONS} videos can wait in the queue, with a maximum of ${MAX_OUTSTANDING_VIDEOS} active, queued, preparing, or prepared videos total. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
-        "Use /chatid in a private chat to get its ID for restart notifications.",
+        "When the owner inbox is enabled, the bot keeps up to 1,000 recent private messages (text/captions and basic sender or attachment details) so the owner can review and reply. Media files are not copied into the inbox; avoid sending sensitive information.",
+        ...(isOwnerInboxChat(message.chat.type, message.chat.id)
+          ? ["Tap 📥 Open inbox to browse recent users and reply with buttons."]
+          : []),
+        "Use /chatid in a private chat to get its ID for restart notifications and the owner-only inbox.",
         "Use /railwayvars in your configured private chat to see runtime settings and whether a readable yt-dlp cookies file is loaded; credential values are never sent.",
       ].join("\n"),
+      isOwnerInboxChat(message.chat.type, message.chat.id)
+        ? ownerInboxKeyboard()
+        : undefined,
     );
     return;
   }
@@ -1038,7 +1421,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     await sendMessage(
       message.chat.id,
       message.chat.type === "private"
-        ? `Private chat ID: ${message.chat.id}\nSet this as TELEGRAM_RESTART_NOTIFICATION_CHAT_ID in Railway.`
+        ? `Private chat ID: ${message.chat.id}\nSet this as TELEGRAM_RESTART_NOTIFICATION_CHAT_ID in Railway to enable restart notifications, runtime settings, and the owner-only inbox.`
         : "For privacy, send /chatid in a private chat with this bot.",
     );
     return;
@@ -1300,6 +1683,10 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     await answerCallback(callback.id);
     return;
   }
+  if (callback.data.startsWith("inbox:")) {
+    await handleInboxCallback(callback);
+    return;
+  }
   const key = makeSessionKey(message.chat.id, callback.from.id);
   const pending = [...pendingVideos.values()].find(
     (video) =>
@@ -1475,7 +1862,7 @@ async function runCompressionJob(
     }
     if (sourceStat.size > videoLimits.maxInputBytes) {
       throw new VideoProcessingError(
-        "This video is larger than the 4 GB limit.",
+        `This video exceeds the ${videoLimits.maxInputSizeLabel} processing limit.`,
         "input_too_large",
       );
     }
@@ -1650,7 +2037,7 @@ async function runCompressionJob(
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (update.message) {
-    await handleMessage(update.message);
+    await handleMessage(update.message, update.update_id);
   } else if (update.callback_query) {
     await handleCallback(update.callback_query);
   }
@@ -1819,6 +2206,12 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     mkdir(BOT_API_TEMP_DIR, { recursive: true }),
     mkdir(JOBS_DIR, { recursive: true }),
   ]);
+  await telegramInbox.load().catch((error: unknown) => {
+    logger.warn(
+      { code: errorName(error) },
+      "Could not load the saved owner inbox; continuing with an empty inbox",
+    );
+  });
   await cleanupOrphanedJobFiles();
   startJobArtifactCleanup();
 
@@ -1846,7 +2239,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     });
     await telegramCall("setMyDescription", {
       description:
-        "Compress videos from uploads, direct links, or supported public video pages. Select a preset or custom resolution and receive the compressed file here.",
+        "Compress videos from uploads, direct links, or supported public video pages. When enabled, the owner can review recent private messages and reply; media files are not copied into the inbox.",
     });
     await telegramCall("setMyShortDescription", {
       short_description: "Compress videos to your chosen resolution.",
@@ -1873,7 +2266,8 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     } else if (notificationChatId != null) {
       void sendMessage(
         notificationChatId,
-        "The bot restarted successfully.",
+        "The bot restarted successfully. Use the Open inbox button to manage recent users and replies.",
+        ownerInboxKeyboard(),
       ).catch((error: unknown) => {
         logger.warn(
           { code: errorName(error) },

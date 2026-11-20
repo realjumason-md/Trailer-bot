@@ -13,7 +13,7 @@ import {
 
 function options() {
   return {
-    maxBytes: 4 * 1024 * 1024 * 1024,
+    maxBytes: 10_000_000_000,
     signal: new AbortController().signal,
     onProgress: () => undefined,
   };

@@ -8,9 +8,14 @@ import {
   SceneCleaningCancelledError,
   type SceneRemovalPlan,
 } from "./scene-cleaning.ts";
+import {
+  MAX_TELEGRAM_OUTPUT_BYTES,
+  MAX_VIDEO_INPUT_BYTES,
+  MAX_TELEGRAM_UPLOAD_INPUT_BYTES,
+  TELEGRAM_UPLOAD_INPUT_LIMIT_LABEL,
+  VIDEO_INPUT_LIMIT_LABEL,
+} from "./video-limits.ts";
 
-const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
-const MAX_TELEGRAM_OUTPUT_BYTES = 1_900_000_000;
 const MAX_COMPRESSION_DURATION_MS = 12 * 60 * 60 * 1_000;
 const MAX_PROBE_DURATION_MS = 5 * 60 * 1_000;
 const FORCE_KILL_GRACE_MS = 5_000;
@@ -60,6 +65,14 @@ export type VideoInfo = {
 export const COMPRESSION_CRF_LEVELS = [27, 31, 35, 38] as const;
 export const SAME_RESOLUTION_COMPRESSION_CRF_LEVELS = COMPRESSION_CRF_LEVELS;
 export const VIDEO_ENCODING_PRESET = "fast" as const;
+
+export function isTelegramOutputWithinLimit(outputBytes: number): boolean {
+  return (
+    Number.isSafeInteger(outputBytes) &&
+    outputBytes >= 0 &&
+    outputBytes <= MAX_TELEGRAM_OUTPUT_BYTES
+  );
+}
 
 const MIN_ETA_PROGRESS_FRACTION = 0.05;
 const MIN_ETA_ELAPSED_SECONDS = 60;
@@ -437,9 +450,9 @@ export async function compressVideo(options: {
       "invalid_video",
     );
   }
-  if (input.size > MAX_INPUT_BYTES) {
+  if (input.size > MAX_VIDEO_INPUT_BYTES) {
     throw new VideoProcessingError(
-      "This video is larger than the 4 GB limit.",
+      `This video exceeds the ${VIDEO_INPUT_LIMIT_LABEL} processing limit.`,
       "input_too_large",
     );
   }
@@ -611,7 +624,7 @@ export async function compressVideo(options: {
       encodedBytes = (await stat(options.outputPath)).size;
       if (
         encodedBytes < input.size &&
-        encodedBytes <= MAX_TELEGRAM_OUTPUT_BYTES
+        isTelegramOutputWithinLimit(encodedBytes)
       ) {
         break;
       }
@@ -623,7 +636,7 @@ export async function compressVideo(options: {
         "output_not_smaller",
       );
     }
-    if (encodedBytes > MAX_TELEGRAM_OUTPUT_BYTES) {
+    if (!isTelegramOutputWithinLimit(encodedBytes)) {
       throw new VideoProcessingError(
         "The compressed video is still too large to send through Telegram. Try a lower resolution.",
         "output_too_large",
@@ -732,7 +745,10 @@ export async function compressVideo(options: {
 }
 
 export const videoLimits = {
-  maxInputBytes: MAX_INPUT_BYTES,
+  maxInputBytes: MAX_VIDEO_INPUT_BYTES,
+  maxInputSizeLabel: VIDEO_INPUT_LIMIT_LABEL,
+  maxTelegramUploadBytes: MAX_TELEGRAM_UPLOAD_INPUT_BYTES,
+  maxTelegramUploadSizeLabel: TELEGRAM_UPLOAD_INPUT_LIMIT_LABEL,
   maxTelegramOutputBytes: MAX_TELEGRAM_OUTPUT_BYTES,
   maxCompressionDurationMs: MAX_COMPRESSION_DURATION_MS,
 };

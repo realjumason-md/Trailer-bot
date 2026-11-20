@@ -3,10 +3,7 @@ import test from "node:test";
 import { compressedVideoFileName } from "./compressed-video-file-name.ts";
 
 test("keeps the source name and uses the compressed MP4 extension", () => {
-  assert.equal(
-    compressedVideoFileName("holiday clip.mov"),
-    "holiday clip.mp4",
-  );
+  assert.equal(compressedVideoFileName("holiday clip.mov"), "holiday clip.mp4");
   assert.equal(compressedVideoFileName("C:\\videos\\party.MKV"), "party.mp4");
 });
 

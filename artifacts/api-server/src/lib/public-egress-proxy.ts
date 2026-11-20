@@ -35,7 +35,11 @@ async function forwardHttpRequest(
     url = parseDownloadUrl(request.url ?? "");
     address = await resolvePublicAddress(url);
   } catch {
-    responseText(response, 403, "The download target is not publicly reachable.");
+    responseText(
+      response,
+      403,
+      "The download target is not publicly reachable.",
+    );
     return;
   }
 
@@ -88,7 +92,11 @@ async function forwardHttpRequest(
 
   upstreamRequest.on("error", () => {
     if (!response.headersSent) {
-      responseText(response, 502, "The public download host could not be reached.");
+      responseText(
+        response,
+        502,
+        "The public download host could not be reached.",
+      );
     } else {
       response.destroy();
     }
@@ -100,11 +108,13 @@ async function forwardHttpRequest(
   request.pipe(upstreamRequest);
 }
 
-function connectResponse(socket: Duplex, status: number, message: string): void {
+function connectResponse(
+  socket: Duplex,
+  status: number,
+  message: string,
+): void {
   if (socket.destroyed) return;
-  socket.end(
-    `HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`,
-  );
+  socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
 }
 
 async function forwardConnect(

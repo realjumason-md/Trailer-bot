@@ -30,10 +30,7 @@ export async function retryWithBackoff<T>(
         throw error;
       }
 
-      const delayMilliseconds = Math.max(
-        0,
-        options.delayMs(attempt),
-      );
+      const delayMilliseconds = Math.max(0, options.delayMs(attempt));
       options.onRetry?.(error, attempt + 1, delayMilliseconds);
       await (options.wait ?? sleep)(delayMilliseconds);
     }

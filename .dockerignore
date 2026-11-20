@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+# yt-dlp cookies are credentials and must stay out of the Docker build context.
+cookies.txt
+cookies-*.txt
+**/cookies.txt
+**/cookies-*.txt
 node_modules
 **/node_modules
 **/dist

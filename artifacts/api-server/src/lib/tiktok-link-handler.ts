@@ -8,6 +8,7 @@ import {
   resolvePublicAddress,
 } from "./remote-video-download.ts";
 import { startPublicEgressProxy } from "./public-egress-proxy.ts";
+import { VIDEO_INPUT_LIMIT_LABEL } from "./video-limits.ts";
 
 const POST_HOSTS = new Set([
   "tiktok.com",
@@ -176,7 +177,7 @@ export function tiktokFailureMessage(error: unknown): string {
     error instanceof TikTokDownloadError ? error.code : "download-failed";
   switch (code) {
     case "too-large":
-      return "That TikTok video is larger than this bot's 4 GB input limit.";
+      return `That TikTok video exceeds this bot's ${VIDEO_INPUT_LIMIT_LABEL} input limit.`;
     case "timeout":
       return "The TikTok download timed out. Try another video link.";
     case "cancelled":
@@ -219,7 +220,7 @@ export function publicVideoFailureMessage(
     error instanceof TikTokDownloadError ? error.code : "download-failed";
   switch (code) {
     case "too-large":
-      return "That video is larger than this bot's 4 GB input limit.";
+      return `That video exceeds this bot's ${VIDEO_INPUT_LIMIT_LABEL} input limit.`;
     case "timeout":
       return "The video download timed out. Try another link.";
     case "cancelled":
@@ -233,7 +234,7 @@ export function publicVideoFailureMessage(
     case "drm-protected":
       return "This video is DRM-protected, which the bot does not support.";
     case "access-denied":
-      return `The ${pageLabel} link refused public access or the video is no longer available. Check that the link can be opened without signing in.`;
+      return `The ${pageLabel} link was denied to the bot's server or has expired. It may still work in a browser or download app. Use a link the host permits for server downloads, or upload the video.`;
     case "extractor-missing":
       return `yt-dlp does not currently recognize a supported extractor for that ${pageLabel}.`;
     case "rate-limited":
