@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { createWriteStream } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { isIP } from "node:net";
-import { unlink } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { request as httpsRequest } from "node:https";
@@ -51,6 +51,27 @@ export function isZipArchiveUrl(value: string): boolean {
   }
 }
 
+export function hasZipArchiveSignature(signature: Uint8Array): boolean {
+  return (
+    signature.length >= 4 &&
+    signature[0] === 0x50 &&
+    signature[1] === 0x4b &&
+    ((signature[2] === 0x03 && signature[3] === 0x04) ||
+      (signature[2] === 0x05 && signature[3] === 0x06) ||
+      (signature[2] === 0x07 && signature[3] === 0x08))
+  );
+}
+
+export async function isZipArchiveFile(filePath: string): Promise<boolean> {
+  const file = await open(filePath, "r");
+  try {
+    const signature = Buffer.alloc(4);
+    const { bytesRead } = await file.read(signature, 0, signature.length, 0);
+    return hasZipArchiveSignature(signature.subarray(0, bytesRead));
+  } finally {
+    await file.close();
+  }
+}
 export class RemoteVideoDownloadError extends Error {
   readonly code: "input_too_large" | undefined;
 

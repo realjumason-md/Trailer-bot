@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rmdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,6 +34,7 @@ import {
 import {
   downloadRemoteVideo,
   findHttpUrl,
+  isZipArchiveFile,
   isZipArchiveUrl,
   RemoteVideoDownloadError,
 } from "./remote-video-download";
@@ -283,6 +284,7 @@ async function telegramCall<T>(
   method: string,
   payload: Record<string, unknown> = {},
   timeoutMs = 45_000,
+  signal?: AbortSignal,
 ): Promise<T> {
   let response: Response;
   try {
@@ -290,7 +292,9 @@ async function telegramCall<T>(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     throw new TelegramTransportError(
@@ -713,19 +717,23 @@ async function prepareVideo(
   }
 }
 
+function zipArchiveFileName(urlValue: string): string {
+  try {
+    const fileName = path.basename(new URL(urlValue).pathname);
+    const safeName = fileName.replace(/[^A-Za-z0-9._-]/gu, "_").slice(-100);
+    if (safeName && safeName.toLowerCase().endsWith(".zip")) return safeName;
+  } catch {
+    // Use a safe fallback for links whose path does not expose a ZIP name.
+  }
+  return "video-archive.zip";
+}
+
 async function prepareVideoFromUrl(
   message: TelegramMessage,
   url: string,
   source: "url" | "tiktok" = "url",
 ): Promise<void> {
-  if (source === "url" && isZipArchiveUrl(url)) {
-    await sendMessage(
-      message.chat.id,
-      "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
-    );
-    return;
-  }
-
+  const zipUrl = source === "url" && isZipArchiveUrl(url);
   const userId = message.from?.id;
   if (userId == null) return;
   const key = makeSessionKey(message.chat.id, userId);
@@ -735,6 +743,7 @@ async function prepareVideoFromUrl(
 
   const id = randomUUID();
   const inputPath = path.join(JOBS_DIR, `${randomUUID()}.download`);
+  let cleanupPath = inputPath;
   const abortController = new AbortController();
   const preparation: PreparingVideo = {
     id,
@@ -748,6 +757,7 @@ async function prepareVideoFromUrl(
   };
   preparingVideos.set(id, preparation);
   let fileTransferredToPending = false;
+  let archiveDetected = false;
   const siteName = source === "tiktok" ? "TikTok" : getVideoSiteName(url);
 
   try {
@@ -755,7 +765,9 @@ async function prepareVideoFromUrl(
       message.chat.id,
       source === "tiktok"
         ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
-        : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). You’ll choose an output resolution when the video is ready.`,
+        : zipUrl
+          ? `Downloading this public ZIP archive (maximum ${formatBytes(videoLimits.maxTelegramOutputBytes)}). It will be sent unchanged so you can extract the video.`
+          : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). You’ll choose an output resolution when the video is ready.`,
     );
     preparation.statusMessageId = status.message_id;
 
@@ -764,7 +776,9 @@ async function prepareVideoFromUrl(
     let progressActivity =
       source === "tiktok"
         ? "Fetching TikTok video"
-        : `Downloading ${siteName} video`;
+        : zipUrl
+          ? "Downloading ZIP archive"
+          : `Downloading ${siteName} video`;
     const reportDownloadProgress = (
       downloadedBytes: number,
       totalBytes?: number,
@@ -797,40 +811,65 @@ async function prepareVideoFromUrl(
         onProgress: (bytes, totalBytes) =>
           reportDownloadProgress(bytes, totalBytes),
       });
-    const downloadedBytes =
-      source === "tiktok"
-        ? await downloadTikTokVideo(url, inputPath, {
-            maxBytes: videoLimits.maxInputBytes,
-            signal: abortController.signal,
-            onProgress: (bytes) => reportDownloadProgress(bytes),
-          })
-        : isStreamingManifestUrl(url)
-          ? await downloadWithYtDlp()
-          : await downloadRemoteVideo(url, inputPath, {
-              maxBytes: videoLimits.maxInputBytes,
-              signal: abortController.signal,
-              onProgress: (progress) =>
-                reportDownloadProgress(
-                  progress.downloadedBytes,
-                  progress.totalBytes,
-                ),
-            }).catch(async (error: unknown) => {
-              if (
-                abortController.signal.aborted ||
-                (error instanceof RemoteVideoDownloadError &&
-                  error.code === "input_too_large")
-              ) {
-                throw error;
-              }
-              return downloadWithYtDlp();
-            });
+    let downloadedBytes: number;
+    if (source === "tiktok") {
+      downloadedBytes = await downloadTikTokVideo(url, inputPath, {
+        maxBytes: videoLimits.maxInputBytes,
+        signal: abortController.signal,
+        onProgress: (bytes) => reportDownloadProgress(bytes),
+      });
+    } else if (zipUrl) {
+      try {
+        downloadedBytes = await downloadRemoteVideo(url, inputPath, {
+          maxBytes: videoLimits.maxTelegramOutputBytes,
+          signal: abortController.signal,
+          onProgress: (progress) =>
+            reportDownloadProgress(
+              progress.downloadedBytes,
+              progress.totalBytes,
+            ),
+        });
+      } catch (error) {
+        if (
+          error instanceof RemoteVideoDownloadError &&
+          error.code === "input_too_large"
+        ) {
+          throw new RemoteVideoDownloadError(
+            `This ZIP archive exceeds Telegram’s ${formatBytes(videoLimits.maxTelegramOutputBytes)} document limit.`,
+            "input_too_large",
+          );
+        }
+        throw error;
+      }
+    } else if (isStreamingManifestUrl(url)) {
+      downloadedBytes = await downloadWithYtDlp();
+    } else {
+      downloadedBytes = await downloadRemoteVideo(url, inputPath, {
+        maxBytes: videoLimits.maxInputBytes,
+        signal: abortController.signal,
+        onProgress: (progress) =>
+          reportDownloadProgress(
+            progress.downloadedBytes,
+            progress.totalBytes,
+          ),
+      }).catch(async (error: unknown) => {
+        if (
+          abortController.signal.aborted ||
+          (error instanceof RemoteVideoDownloadError &&
+            error.code === "input_too_large")
+        ) {
+          throw error;
+        }
+        return downloadWithYtDlp();
+      });
+    }
 
     if (preparation.cancelled) {
       await unlink(inputPath).catch(() => undefined);
       await editMessage(
         message.chat.id,
         status.message_id,
-        "Video download cancelled.",
+        zipUrl ? "ZIP download cancelled." : "Video download cancelled.",
       ).catch(() => undefined);
       return;
     }
@@ -847,6 +886,68 @@ async function prepareVideoFromUrl(
       );
     }
 
+    archiveDetected = source === "url" && await isZipArchiveFile(inputPath);
+    if (zipUrl && !archiveDetected) {
+      throw new RemoteVideoDownloadError(
+        "That link did not return a valid ZIP archive.",
+      );
+    }
+    if (archiveDetected) {
+      if (localFile.size > videoLimits.maxTelegramOutputBytes) {
+        throw new RemoteVideoDownloadError(
+          `This ZIP archive exceeds Telegram’s ${formatBytes(videoLimits.maxTelegramOutputBytes)} document limit.`,
+          "input_too_large",
+        );
+      }
+      if (preparation.cancelled) {
+        await editMessage(
+          message.chat.id,
+          status.message_id,
+          "ZIP download cancelled.",
+        ).catch(() => undefined);
+        return;
+      }
+      const archivePath = path.join(
+        JOBS_DIR,
+        `${randomUUID()}-${zipArchiveFileName(url)}`,
+      );
+      await rename(inputPath, archivePath);
+      cleanupPath = archivePath;
+      preparation.filePath = archivePath;
+      preparation.fileSize = localFile.size;
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        `ZIP archive downloaded (${formatBytes(localFile.size)}). Sending it unchanged as a document.`,
+      ).catch(() => undefined);
+      if (preparation.cancelled) {
+        await editMessage(
+          message.chat.id,
+          status.message_id,
+          "ZIP transfer cancelled.",
+        ).catch(() => undefined);
+        return;
+      }
+      await telegramCall(
+        "sendDocument",
+        {
+          chat_id: message.chat.id,
+          document: pathToFileURL(archivePath).href,
+          reply_to_message_id: message.message_id,
+          allow_sending_without_reply: true,
+          disable_content_type_detection: true,
+          caption: `ZIP archive (${formatBytes(localFile.size)}). Extract the video, then send it here to compress.`,
+        },
+        LONG_TELEGRAM_FILE_TIMEOUT_MS,
+        abortController.signal,
+      );
+      await editMessage(
+        message.chat.id,
+        status.message_id,
+        "ZIP archive sent unchanged. Extract it and send the video back to compress.",
+      ).catch(() => undefined);
+      return;
+    }
     preparation.fileSize = localFile.size;
     await editMessage(
       message.chat.id,
@@ -925,17 +1026,30 @@ async function prepareVideoFromUrl(
     fileTransferredToPending = true;
   } catch (error) {
     const cancelled = preparation.cancelled || abortController.signal.aborted;
-    const userMessage = cancelled
-      ? "Video download cancelled."
-      : error instanceof TikTokDownloadError
-        ? source === "tiktok"
+    let userMessage: string;
+    if (cancelled) {
+      userMessage = archiveDetected || zipUrl
+        ? "ZIP transfer cancelled."
+        : "Video download cancelled.";
+    } else if (
+      archiveDetected &&
+      (error instanceof TelegramApiError ||
+        error instanceof TelegramTransportError)
+    ) {
+      userMessage =
+        "The ZIP downloaded, but Telegram could not send it. Try again later or use a smaller archive.";
+    } else if (error instanceof TikTokDownloadError) {
+      userMessage =
+        source === "tiktok"
           ? tiktokFailureMessage(error)
-          : publicVideoFailureMessage(error, siteName)
-        : error instanceof VideoProcessingError
-          ? error.message
-          : error instanceof RemoteVideoDownloadError
-            ? error.message
-            : "I couldn’t download that video link. Check it and try again.";
+          : publicVideoFailureMessage(error, siteName);
+    } else if (error instanceof VideoProcessingError) {
+      userMessage = error.message;
+    } else if (error instanceof RemoteVideoDownloadError) {
+      userMessage = error.message;
+    } else {
+      userMessage = "I couldn’t download that video link. Check it and try again.";
+    }
     if (preparation.statusMessageId != null) {
       await editMessage(
         message.chat.id,
@@ -948,13 +1062,13 @@ async function prepareVideoFromUrl(
     if (!cancelled) {
       logger.warn(
         { code: error instanceof Error ? error.name : "unknown_error" },
-        "Could not download a linked video",
+        "Could not download or send a linked file",
       );
     }
   } finally {
     preparingVideos.delete(id);
     if (!fileTransferredToPending) {
-      await unlink(inputPath).catch(() => undefined);
+      await unlink(cleanupPath).catch(() => undefined);
     }
   }
 }
@@ -1392,7 +1506,7 @@ async function handleMessage(
       message.chat.id,
       [
         `Send me a Telegram video upload up to ${videoLimits.maxTelegramUploadSizeLabel}, paste a direct public video-file link up to ${videoLimits.maxInputSizeLabel}, or send a supported public video page link up to ${videoLimits.maxInputSizeLabel}.`,
-        "ZIP archive links are not supported. Extract the video first, then send the video file or a direct link to it.",
+        "Send a public ZIP download link and I’ll return the archive unchanged. Extract the video and send it back here to compress. ZIP files must fit Telegram’s document limit.",
         "Public page extraction uses yt-dlp. Common examples include YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo, but support varies by site and extractor version. Direct HLS/DASH manifest links are handled by yt-dlp.",
         "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
         "Some sites temporarily rate-limit downloads or change their extractors. The bot reports those separately from login-required, geo-restricted, and unsupported pages.",

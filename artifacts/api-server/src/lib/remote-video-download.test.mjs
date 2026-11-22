@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +8,8 @@ import {
   downloadRemoteVideo,
   findHttpUrl,
   isCompletePartialResponse,
+  hasZipArchiveSignature,
+  isZipArchiveFile,
   isZipArchiveUrl,
   RemoteVideoDownloadError,
 } from "./remote-video-download.ts";
@@ -58,6 +61,43 @@ test("recognizes ZIP archive links, including query strings and trailing slashes
   assert.equal(isZipArchiveUrl("https://cdn.example/clip.zip.mp4"), false);
   assert.equal(isZipArchiveUrl("https://cdn.example/clip.mp4"), false);
   assert.equal(isZipArchiveUrl("file:///tmp/clip.zip"), false);
+});
+
+test("recognizes standard ZIP signatures without extracting the archive", () => {
+  for (const signature of [
+    [0x50, 0x4b, 0x03, 0x04],
+    [0x50, 0x4b, 0x05, 0x06],
+    [0x50, 0x4b, 0x07, 0x08],
+  ]) {
+    assert.equal(hasZipArchiveSignature(Uint8Array.from(signature)), true);
+  }
+  assert.equal(
+    hasZipArchiveSignature(Uint8Array.from([0x50, 0x4b, 0x00, 0x00])),
+    false,
+  );
+  assert.equal(
+    hasZipArchiveSignature(Uint8Array.from([0x50, 0x4b, 0x03])),
+    false,
+  );
+  assert.equal(
+    hasZipArchiveSignature(new TextEncoder().encode("ftyp")),
+    false,
+  );
+});
+
+test("detects downloaded ZIP files by reading their file signature", async () => {
+  const archivePath = path.join(tmpdir(), `${randomUUID()}.zip`);
+  try {
+    await writeFile(
+      archivePath,
+      Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02, 0x03]),
+    );
+    assert.equal(await isZipArchiveFile(archivePath), true);
+    await writeFile(archivePath, "not a ZIP archive");
+    assert.equal(await isZipArchiveFile(archivePath), false);
+  } finally {
+    await unlink(archivePath).catch(() => undefined);
+  }
 });
 
 test("rejects localhost and private-network download URLs before connecting", async () => {

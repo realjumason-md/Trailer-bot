@@ -90,7 +90,7 @@ For supported sites that require an authenticated session, export a Netscape-for
 
 - Accepts Telegram video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links and supported public video pages up to 5 GB.
-- ZIP archives are not supported. Extract videos before sending or linking them.
+- Direct public ZIP download links are sent back unchanged as Telegram documents up to 1.9 GB. The bot does not extract them; extract the video and send it back to compress. Direct downloads are checked by ZIP signature, including links without a `.zip` filename.
 - Uses yt-dlp for public HLS/DASH manifests and supported video pages, including common extractors for YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo. Coverage changes with site behavior and yt-dlp versions; this is not support for every website.
 - Prefers MP4 video/audio formats when available and merges separate streams. Progress includes yt-dlp download progress plus output-size monitoring. Login-required, geo-restricted, rate-limited, unsupported, inaccessible, and DRM-protected sources have distinct user-facing outcomes.
 - A configured Netscape cookies file can be used only for content the associated account is allowed to view. Private or login-only content may still be inaccessible, and DRM-protected media remains unsupported.
