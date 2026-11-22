@@ -62,6 +62,16 @@ export function hasZipArchiveSignature(signature: Uint8Array): boolean {
   );
 }
 
+export function getDownloadByteLimitForSignature(
+  signature: Uint8Array,
+  maxBytes: number,
+  maxBytesForZip?: number,
+): number {
+  return hasZipArchiveSignature(signature) && maxBytesForZip != null
+    ? Math.min(maxBytes, maxBytesForZip)
+    : maxBytes;
+}
+
 export async function isZipArchiveFile(filePath: string): Promise<boolean> {
   const file = await open(filePath, "r");
   try {
@@ -360,6 +370,8 @@ async function downloadRedirects(
   url: URL,
   destination: string,
   maxBytes: number,
+  maxBytesForZip: number | undefined,
+  zipLimitMessage: string | undefined,
   signal: AbortSignal,
   onProgress: (progress: DownloadProgress) => void,
   redirectsRemaining: number,
@@ -383,6 +395,8 @@ async function downloadRedirects(
       parseDownloadUrl(new URL(location, url).toString()),
       destination,
       maxBytes,
+      maxBytesForZip,
+      zipLimitMessage,
       signal,
       onProgress,
       redirectsRemaining - 1,
@@ -435,23 +449,29 @@ async function downloadRedirects(
         : undefined;
   let downloadedBytes = 0;
   let initialBytes = Buffer.alloc(0);
+  let archiveSignatureDetected = false;
+  let effectiveMaxBytes = maxBytes;
   const progressStream = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       downloadedBytes += chunk.length;
-      if (downloadedBytes > maxBytes) {
-        callback(
-          new RemoteVideoDownloadError(
-            `This bot accepts linked videos up to ${VIDEO_INPUT_LIMIT_LABEL}.`,
-            "input_too_large",
-          ),
-        );
-        return;
-      }
       if (initialBytes.length < 1_024) {
         initialBytes = Buffer.concat([
           initialBytes,
           chunk.subarray(0, 1_024 - initialBytes.length),
         ]);
+        if (
+          !archiveSignatureDetected &&
+          maxBytesForZip != null &&
+          initialBytes.length >= 4 &&
+          hasZipArchiveSignature(initialBytes.subarray(0, 4))
+        ) {
+          archiveSignatureDetected = true;
+          effectiveMaxBytes = getDownloadByteLimitForSignature(
+            initialBytes.subarray(0, 4),
+            maxBytes,
+            maxBytesForZip,
+          );
+        }
         const signature = initialBytes
           .toString("utf8")
           .replace(/^\uFEFF/, "")
@@ -468,6 +488,17 @@ async function downloadRedirects(
           );
           return;
         }
+      }
+      if (downloadedBytes > effectiveMaxBytes) {
+        callback(
+          new RemoteVideoDownloadError(
+            archiveSignatureDetected && zipLimitMessage
+              ? zipLimitMessage
+              : `This bot accepts linked videos up to ${VIDEO_INPUT_LIMIT_LABEL}.`,
+            "input_too_large",
+          ),
+        );
+        return;
       }
       onProgress({
         downloadedBytes,
@@ -512,6 +543,8 @@ export async function downloadRemoteVideo(
   destination: string,
   options: {
     maxBytes: number;
+    maxBytesForZip?: number;
+    zipLimitMessage?: string;
     signal: AbortSignal;
     onProgress: (progress: DownloadProgress) => void;
   },
@@ -521,6 +554,8 @@ export async function downloadRemoteVideo(
       parseDownloadUrl(value),
       destination,
       options.maxBytes,
+      options.maxBytesForZip,
+      options.zipLimitMessage,
       options.signal,
       options.onProgress,
       MAX_REDIRECTS,

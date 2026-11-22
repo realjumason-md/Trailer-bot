@@ -846,12 +846,11 @@ async function prepareVideoFromUrl(
     } else {
       downloadedBytes = await downloadRemoteVideo(url, inputPath, {
         maxBytes: videoLimits.maxInputBytes,
+        maxBytesForZip: videoLimits.maxTelegramOutputBytes,
+        zipLimitMessage: `This ZIP archive exceeds Telegram’s ${formatBytes(videoLimits.maxTelegramOutputBytes)} document limit.`,
         signal: abortController.signal,
         onProgress: (progress) =>
-          reportDownloadProgress(
-            progress.downloadedBytes,
-            progress.totalBytes,
-          ),
+          reportDownloadProgress(progress.downloadedBytes, progress.totalBytes),
       }).catch(async (error: unknown) => {
         if (
           abortController.signal.aborted ||
@@ -886,7 +885,7 @@ async function prepareVideoFromUrl(
       );
     }
 
-    archiveDetected = source === "url" && await isZipArchiveFile(inputPath);
+    archiveDetected = source === "url" && (await isZipArchiveFile(inputPath));
     if (zipUrl && !archiveDetected) {
       throw new RemoteVideoDownloadError(
         "That link did not return a valid ZIP archive.",
@@ -1028,9 +1027,10 @@ async function prepareVideoFromUrl(
     const cancelled = preparation.cancelled || abortController.signal.aborted;
     let userMessage: string;
     if (cancelled) {
-      userMessage = archiveDetected || zipUrl
-        ? "ZIP transfer cancelled."
-        : "Video download cancelled.";
+      userMessage =
+        archiveDetected || zipUrl
+          ? "ZIP transfer cancelled."
+          : "Video download cancelled.";
     } else if (
       archiveDetected &&
       (error instanceof TelegramApiError ||
@@ -1048,7 +1048,8 @@ async function prepareVideoFromUrl(
     } else if (error instanceof RemoteVideoDownloadError) {
       userMessage = error.message;
     } else {
-      userMessage = "I couldn’t download that video link. Check it and try again.";
+      userMessage =
+        "I couldn’t download that video link. Check it and try again.";
     }
     if (preparation.statusMessageId != null) {
       await editMessage(

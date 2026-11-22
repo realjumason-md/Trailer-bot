@@ -8,6 +8,7 @@ import {
   downloadRemoteVideo,
   findHttpUrl,
   isCompletePartialResponse,
+  getDownloadByteLimitForSignature,
   hasZipArchiveSignature,
   isZipArchiveFile,
   isZipArchiveUrl,
@@ -79,9 +80,35 @@ test("recognizes standard ZIP signatures without extracting the archive", () => 
     hasZipArchiveSignature(Uint8Array.from([0x50, 0x4b, 0x03])),
     false,
   );
+  assert.equal(hasZipArchiveSignature(new TextEncoder().encode("ftyp")), false);
+});
+
+test("applies the ZIP byte limit when the download signature is recognized", () => {
+  const maxVideoBytes = 5_000_000_000;
+  const maxZipBytes = 1_900_000_000;
   assert.equal(
-    hasZipArchiveSignature(new TextEncoder().encode("ftyp")),
-    false,
+    getDownloadByteLimitForSignature(
+      Uint8Array.from([0x50, 0x4b, 0x03]),
+      maxVideoBytes,
+      maxZipBytes,
+    ),
+    maxVideoBytes,
+  );
+  assert.equal(
+    getDownloadByteLimitForSignature(
+      Uint8Array.from([0x50, 0x4b, 0x03, 0x04]),
+      maxVideoBytes,
+      maxZipBytes,
+    ),
+    maxZipBytes,
+  );
+  assert.equal(
+    getDownloadByteLimitForSignature(
+      Uint8Array.from([0x50, 0x4b, 0x03, 0x04]),
+      maxZipBytes,
+      maxVideoBytes,
+    ),
+    maxZipBytes,
   );
 });
 
