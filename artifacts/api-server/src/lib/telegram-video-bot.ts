@@ -327,13 +327,7 @@ async function sendMessage(
   return telegramCall<TelegramMessage>("sendMessage", {
     chat_id: chatId,
     text,
-    reply_markup:
-      replyMarkup ??
-      telegramBotMenuKeyboard(
-        parseRestartNotificationChatId(
-          process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
-        ) === chatId,
-      ),
+    reply_markup: replyMarkup ?? telegramBotMenuKeyboard(),
     disable_web_page_preview: true,
   });
 }
@@ -547,9 +541,7 @@ async function prepareVideo(
     const status = await sendMessage(
       message.chat.id,
       `Video received${reportedSize}${reportedDuration}. Preparing the upload. Compression starts after you choose a resolution; I’ll estimate the time as it encodes.`,
-      telegramBotMenuKeyboard(
-        isOwnerInboxChat(message.chat.type, message.chat.id),
-      ),
+      telegramBotMenuKeyboard(),
     );
     preparation.statusMessageId = status.message_id;
 
@@ -1183,7 +1175,7 @@ function isOwnerInboxChat(
 }
 
 function ownerInboxKeyboard(): Record<string, unknown> {
-  return telegramBotMenuKeyboard(true);
+  return telegramBotMenuKeyboard();
 }
 
 function inboxHomeKeyboard(): Record<string, unknown> {
@@ -1514,7 +1506,6 @@ async function handleMessage(
   }
 
   if (commandText?.startsWith("/start") || commandText?.startsWith("/help")) {
-    const ownerChat = isOwnerInboxChat(message.chat.type, message.chat.id);
     await sendMessage(
       message.chat.id,
       [
@@ -1531,15 +1522,11 @@ async function handleMessage(
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         `Compression is one video at a time; up to ${MAX_WAITING_COMPRESSIONS} videos can wait in the queue, with a maximum of ${MAX_OUTSTANDING_VIDEOS} active, queued, preparing, or prepared videos total. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
         "When the owner inbox is enabled, the bot keeps up to 1,000 recent private messages (text/captions and basic sender or attachment details) so the owner can review and reply. Media files are not copied into the inbox; avoid sending sensitive information.",
-        ...(ownerChat
-          ? [
-              "Owner tools: tap Runtime settings to view non-secret configuration, or Open inbox to review recent users and reply.",
-            ]
-          : []),
         "Use Chat ID in a private chat to get its ID for restart notifications.",
+        "Runtime settings and Open inbox are visible in the menu, but only the configured owner chat can use them.",
         "Buttons are the main controls. Existing slash commands remain available as typed fallbacks.",
       ].join("\n"),
-      telegramBotMenuKeyboard(ownerChat),
+      telegramBotMenuKeyboard(),
     );
     return;
   }

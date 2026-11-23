@@ -35,23 +35,11 @@ test("maps the reply-keyboard buttons to their existing command handlers", () =>
   assert.equal(telegramBotMenuCommand("640p"), null);
 });
 
-test("shows owner tools only in the configured owner's menu", () => {
-  const userMenu = telegramBotMenuKeyboard(false);
-  const ownerMenu = telegramBotMenuKeyboard(true);
-  const buttonTexts = (menu) =>
-    menu.keyboard.flat().map((button) => button.text);
+test("shows the same command buttons to every user", () => {
+  const menu = telegramBotMenuKeyboard();
+  const buttonTexts = menu.keyboard.flat().map((button) => button.text);
 
-  assert.equal(userMenu.is_persistent, true);
-  assert.equal(userMenu.resize_keyboard, true);
-  assert.ok(buttonTexts(userMenu).includes(TELEGRAM_BOT_MENU_BUTTONS.help));
-  assert.ok(buttonTexts(userMenu).includes(TELEGRAM_BOT_MENU_BUTTONS.status));
-  assert.ok(
-    !buttonTexts(userMenu).includes(TELEGRAM_BOT_MENU_BUTTONS.openInbox),
-  );
-  assert.ok(
-    buttonTexts(ownerMenu).includes(TELEGRAM_BOT_MENU_BUTTONS.runtimeSettings),
-  );
-  assert.ok(
-    buttonTexts(ownerMenu).includes(TELEGRAM_BOT_MENU_BUTTONS.openInbox),
-  );
+  assert.equal(menu.is_persistent, true);
+  assert.equal(menu.resize_keyboard, true);
+  assert.deepEqual(buttonTexts, Object.values(TELEGRAM_BOT_MENU_BUTTONS));
 });

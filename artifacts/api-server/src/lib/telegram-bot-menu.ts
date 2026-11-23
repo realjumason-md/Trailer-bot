@@ -23,9 +23,7 @@ export function telegramBotMenuCommand(
   return text ? (BUTTON_COMMANDS.get(text) ?? null) : null;
 }
 
-export function telegramBotMenuKeyboard(
-  ownerTools: boolean,
-): Record<string, unknown> {
+export function telegramBotMenuKeyboard(): Record<string, unknown> {
   return {
     keyboard: [
       [
@@ -37,14 +35,10 @@ export function telegramBotMenuKeyboard(
         { text: TELEGRAM_BOT_MENU_BUTTONS.stopActive },
       ],
       [{ text: TELEGRAM_BOT_MENU_BUTTONS.chatId }],
-      ...(ownerTools
-        ? [
-            [
-              { text: TELEGRAM_BOT_MENU_BUTTONS.runtimeSettings },
-              { text: TELEGRAM_BOT_MENU_BUTTONS.openInbox },
-            ],
-          ]
-        : []),
+      [
+        { text: TELEGRAM_BOT_MENU_BUTTONS.runtimeSettings },
+        { text: TELEGRAM_BOT_MENU_BUTTONS.openInbox },
+      ],
     ],
     resize_keyboard: true,
     is_persistent: true,
