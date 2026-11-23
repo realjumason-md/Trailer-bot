@@ -28,6 +28,11 @@ import {
   type TelegramInboxMessage,
 } from "./telegram-inbox";
 import {
+  telegramBotMenuCommand,
+  telegramBotMenuKeyboard,
+  TELEGRAM_BOT_MENU_BUTTONS,
+} from "./telegram-bot-menu";
+import {
   buildRailwayDeploymentChecklist,
   isAuthorizedRailwayVarsChat,
 } from "./railway-deployment-checklist";
@@ -322,7 +327,13 @@ async function sendMessage(
   return telegramCall<TelegramMessage>("sendMessage", {
     chat_id: chatId,
     text,
-    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    reply_markup:
+      replyMarkup ??
+      telegramBotMenuKeyboard(
+        parseRestartNotificationChatId(
+          process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
+        ) === chatId,
+      ),
     disable_web_page_preview: true,
   });
 }
@@ -536,6 +547,9 @@ async function prepareVideo(
     const status = await sendMessage(
       message.chat.id,
       `Video received${reportedSize}${reportedDuration}. Preparing the upload. Compression starts after you choose a resolution; I’ll estimate the time as it encodes.`,
+      telegramBotMenuKeyboard(
+        isOwnerInboxChat(message.chat.type, message.chat.id),
+      ),
     );
     preparation.statusMessageId = status.message_id;
 
@@ -800,7 +814,7 @@ async function prepareVideoFromUrl(
         void editMessage(
           message.chat.id,
           status.message_id,
-          `${progressActivity}: ${progressLabel} (${formatBytes(downloadedBytes)}). Send /cancel to stop.`,
+          `${progressActivity}: ${progressLabel} (${formatBytes(downloadedBytes)}). Tap “Cancel waiting” to stop.`,
         ).catch(() => undefined);
       }
     };
@@ -1169,11 +1183,7 @@ function isOwnerInboxChat(
 }
 
 function ownerInboxKeyboard(): Record<string, unknown> {
-  return {
-    keyboard: [[{ text: "📥 Open inbox" }]],
-    resize_keyboard: true,
-    is_persistent: true,
-  };
+  return telegramBotMenuKeyboard(true);
 }
 
 function inboxHomeKeyboard(): Record<string, unknown> {
@@ -1433,7 +1443,7 @@ async function handleMessage(
     return;
   }
 
-  if (text === "📥 Open inbox") {
+  if (text === TELEGRAM_BOT_MENU_BUTTONS.openInbox) {
     if (!isOwnerInboxChat(message.chat.type, message.chat.id)) {
       await sendMessage(
         message.chat.id,
@@ -1445,11 +1455,12 @@ async function handleMessage(
     return;
   }
 
+  const commandText = telegramBotMenuCommand(text) ?? text;
   const configuredOwnerChatId = parseRestartNotificationChatId(
     process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"],
   );
   const isIntroCommand = /^\/(?:start|help)(?:@\w+)?(?:\s|$)/iu.test(
-    text ?? "",
+    commandText ?? "",
   );
   if (
     message.chat.type === "private" &&
@@ -1502,7 +1513,8 @@ async function handleMessage(
       });
   }
 
-  if (text?.startsWith("/start") || text?.startsWith("/help")) {
+  if (commandText?.startsWith("/start") || commandText?.startsWith("/help")) {
+    const ownerChat = isOwnerInboxChat(message.chat.type, message.chat.id);
     await sendMessage(
       message.chat.id,
       [
@@ -1513,36 +1525,39 @@ async function handleMessage(
         "Some sites temporarily rate-limit downloads or change their extractors. The bot reports those separately from login-required, geo-restricted, and unsupported pages.",
         "The bot shows the original dimensions, then offers same-resolution compression and lower output sizes. Same-resolution results are sent only when they are smaller than the source.",
         "",
-        "Use /status to check your active, queued, or prepared videos. /cancel removes your next waiting video; /cancel active stops your current compression.",
+        "Use the Status button to check downloads, prepared videos, and compression. Cancel waiting removes the next waiting item; Stop active stops the current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
         "The compressed file is returned here and must fit Telegram's 1.9 GB delivery limit.",
         "Each compressed video replies to the original upload or link, so you can match results when processing several at once.",
         `Compression is one video at a time; up to ${MAX_WAITING_COMPRESSIONS} videos can wait in the queue, with a maximum of ${MAX_OUTSTANDING_VIDEOS} active, queued, preparing, or prepared videos total. Each person can submit up to ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR} videos per hour and ${MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY} per day.`,
         "When the owner inbox is enabled, the bot keeps up to 1,000 recent private messages (text/captions and basic sender or attachment details) so the owner can review and reply. Media files are not copied into the inbox; avoid sending sensitive information.",
-        ...(isOwnerInboxChat(message.chat.type, message.chat.id)
-          ? ["Tap 📥 Open inbox to browse recent users and reply with buttons."]
+        ...(ownerChat
+          ? [
+              "Owner tools: tap Runtime settings to view non-secret configuration, or Open inbox to review recent users and reply.",
+            ]
           : []),
-        "Use /chatid in a private chat to get its ID for restart notifications and the owner-only inbox.",
-        "Use /railwayvars in your configured private chat to see runtime settings and whether a readable yt-dlp cookies file is loaded; credential values are never sent.",
+        "Use Chat ID in a private chat to get its ID for restart notifications.",
+        "Buttons are the main controls. Existing slash commands remain available as typed fallbacks.",
       ].join("\n"),
-      isOwnerInboxChat(message.chat.type, message.chat.id)
-        ? ownerInboxKeyboard()
-        : undefined,
+      telegramBotMenuKeyboard(ownerChat),
     );
     return;
   }
 
-  if (text?.startsWith("/chatid")) {
+  if (commandText?.startsWith("/chatid")) {
     await sendMessage(
       message.chat.id,
       message.chat.type === "private"
         ? `Private chat ID: ${message.chat.id}\nSet this as TELEGRAM_RESTART_NOTIFICATION_CHAT_ID in Railway to enable restart notifications, runtime settings, and the owner-only inbox.`
-        : "For privacy, send /chatid in a private chat with this bot.",
+        : "For privacy, use Chat ID in a private chat with this bot.",
     );
     return;
   }
 
-  if (text === "/railwayvars" || text?.startsWith("/railwayvars@")) {
+  if (
+    commandText === "/railwayvars" ||
+    commandText?.startsWith("/railwayvars@")
+  ) {
     const configuredOwnerChatId =
       process.env["TELEGRAM_RESTART_NOTIFICATION_CHAT_ID"];
     if (
@@ -1554,10 +1569,10 @@ async function handleMessage(
     ) {
       const denial =
         message.chat.type !== "private"
-          ? "For privacy, /railwayvars is available only in your configured private chat."
+          ? "For privacy, Runtime settings is available only in your configured private chat."
           : parseRestartNotificationChatId(configuredOwnerChatId) == null
-            ? "For privacy, /railwayvars is locked until TELEGRAM_RESTART_NOTIFICATION_CHAT_ID is set. Send /chatid in your private chat, set that value in Railway, then restart the bot."
-            : "For privacy, /railwayvars is available only in the configured private chat.";
+            ? "For privacy, Runtime settings is locked until the owner chat is configured. Use Chat ID in your private chat, set that value in Railway, then restart the bot."
+            : "For privacy, Runtime settings is available only in the configured private chat.";
       await sendMessage(message.chat.id, denial);
       return;
     }
@@ -1576,7 +1591,7 @@ async function handleMessage(
     return;
   }
 
-  if (text?.startsWith("/status")) {
+  if (commandText?.startsWith("/status")) {
     const key = userId == null ? "" : makeSessionKey(message.chat.id, userId);
     const queued = key
       ? compressionQueue.toArray().filter((entry) => entry.pending.key === key)
@@ -1615,13 +1630,18 @@ async function handleMessage(
     return;
   }
 
-  if (text?.startsWith("/cancel")) {
+  if (commandText?.startsWith("/cancel")) {
     const key = userId == null ? "" : makeSessionKey(message.chat.id, userId);
-    const cancelActive = /^\/cancel(?:@\w+)?\s+active\b/i.test(text);
-    if (cancelActive && activeJob?.key === key) {
-      activeJob.cancelled = true;
-      activeJob.child?.kill("SIGTERM");
-      await sendMessage(message.chat.id, "Stopping compression...");
+    const cancelActive = /^\/cancel(?:@\w+)?\s+active\b/i.test(commandText);
+    const cancelWaiting = /^\/cancel(?:@\w+)?\s+waiting\b/i.test(commandText);
+    if (cancelActive) {
+      if (activeJob?.key === key) {
+        activeJob.cancelled = true;
+        activeJob.child?.kill("SIGTERM");
+        await sendMessage(message.chat.id, "Stopping compression...");
+      } else {
+        await sendMessage(message.chat.id, "No active compression to stop.");
+      }
       return;
     }
     const queued = key
@@ -1683,6 +1703,13 @@ async function handleMessage(
         preparation.source !== "upload"
           ? "The video download is being cancelled."
           : "Upload preparation will be cancelled when Telegram finishes the transfer.",
+      );
+      return;
+    }
+    if (cancelWaiting) {
+      await sendMessage(
+        message.chat.id,
+        "You do not have a waiting video to cancel.",
       );
       return;
     }
@@ -1787,7 +1814,7 @@ async function handleMessage(
   if (text && !text.startsWith("/")) {
     await sendMessage(
       message.chat.id,
-      "Send a video file to compress, or use /help for instructions.",
+      "Send a video file or paste a public link. Tap Help below for instructions.",
     );
   }
 }
@@ -2339,19 +2366,9 @@ export async function startTelegramVideoBot(): Promise<() => void> {
         "This Telegram bot already has a webhook configured. Remove it before using the local polling bot.",
       );
     }
-    await telegramCall("setMyCommands", {
-      commands: [
-        { command: "start", description: "Start the video compressor" },
-        { command: "help", description: "Show usage instructions" },
-        { command: "chatid", description: "Show this private chat's ID" },
-        {
-          command: "railwayvars",
-          description: "Show private runtime configuration",
-        },
-        { command: "status", description: "Check active and queued videos" },
-        { command: "cancel", description: "Cancel the next waiting video" },
-      ],
-    });
+    // Keep typed slash-command handlers for compatibility while using buttons
+    // as the bot's visible primary menu.
+    await telegramCall("setMyCommands", { commands: [] });
     await telegramCall("setMyDescription", {
       description:
         "Compress videos from uploads, direct links, or supported public video pages. When enabled, the owner can review recent private messages and reply; media files are not copied into the inbox.",
@@ -2381,7 +2398,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
     } else if (notificationChatId != null) {
       void sendMessage(
         notificationChatId,
-        "The bot restarted successfully. Use the Open inbox button to manage recent users and replies.",
+        "The bot restarted successfully. Use the buttons to check status or open the owner inbox.",
         ownerInboxKeyboard(),
       ).catch((error: unknown) => {
         logger.warn(
