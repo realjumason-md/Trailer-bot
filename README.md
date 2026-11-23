@@ -20,9 +20,9 @@ Required environment variables:
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 
-To receive a message after each successful bot startup, open a private chat with the bot, send `/start` and `/chatid`, then set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the returned ID in the local environment or Railway. This configured private chat is also the only chat that can use the owner inbox. The bot must have been started in that chat before Telegram allows it to send a message. A notification failure is logged and does not prevent the bot from starting.
+To receive a message after each successful bot startup, open a private chat with the bot, tap **Help** and **Chat ID**, then set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the returned ID in the local environment or Railway. This configured private chat is also the only chat that can use the owner inbox. The bot must have been started in that chat before Telegram allows it to send a message. A notification failure is logged and does not prevent the bot from starting.
 
-When the owner inbox is enabled, the bot records up to 1,000 recent messages from other private chats (text/captions up to 4,096 characters and basic sender/attachment details) so the owner can review and reply. It does not copy media files into the inbox. Users see this notice in `/start` and `/help`; avoid sending sensitive information to the bot.
+When the owner inbox is enabled, the bot records up to 1,000 recent messages from other private chats (text/captions up to 4,096 characters and basic sender/attachment details) so the owner can review and reply. It does not copy media files into the inbox. Users see this notice on the welcome/help screen; avoid sending sensitive information to the bot.
 
 Scene cleaning is optional and disabled by default. Set `ENABLE_SCENE_CLEANING=true` in the local environment or Railway to automatically remove detected freezes longer than 0.6 seconds and solid-black scenes longer than 0.5 seconds. It never removes more than 25% of the source duration or trims the result below 3 seconds; if detection or filtered encoding fails, compression falls back to the original video.
 
@@ -74,11 +74,11 @@ Railway builds the root `Dockerfile`. It compiles Telegram's official local Bot 
 
 1. Create a Railway service from this repository and keep its root directory at the repository root.
 2. Add a Railway volume mounted at `/data`. Set `BOT_DATA_DIR` to `/data/telegram-video-bot`. The volume stores Telegram's local API state and temporary video files; a near-5 GB linked source plus its Telegram-ready output needs at least about 7 GB free for one job, with additional headroom for retries and other queued or prepared videos.
-3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To enable optional scene cleaning, set `ENABLE_SCENE_CLEANING=true`; it is disabled when unset or false. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from `/chatid` to receive restart messages and enable the owner-only inbox. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
+3. Add these service variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `BOT_DATA_DIR=/data/telegram-video-bot`. To enable optional scene cleaning, set `ENABLE_SCENE_CLEANING=true`; it is disabled when unset or false. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to your private chat ID from the **Chat ID** button to receive restart messages and enable the owner-only inbox. Railway supplies `PORT`; do not hard-code it in Railway. `NODE_ENV=production` is set by the image.
 4. Set the Railway healthcheck path to `/api/healthz` and keep the service to one replica. This bot uses long polling and keeps queue state in process memory; a restart cancels in-flight jobs instead of resuming them.
 5. If this bot is being moved from Telegram's hosted Bot API for the first time, call `logOut` once before starting this service. Do not call it on routine restarts or redeploys.
 
-In the configured private chat, `/railwayvars` shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Use the persistent **Open inbox** button to browse users, view recent message excerpts, and reply with buttons; it appears only in the configured owner chat. Inbox history is stored in `BOT_DATA_DIR/telegram-inbox.json` and capped at 1,000 messages. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by `/chatid`; owner features are disabled until that ID is valid and only that private chat can use them. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
+In the configured private chat, **Runtime settings** shows the bot's known non-secret runtime values and whether credentials are configured. It never prints credential values or dumps platform/operating-system environment variables. Use the persistent **Open inbox** button to browse users, view recent message excerpts, and reply with buttons. Every user sees the same button menu, but Runtime settings and Open inbox are usable only in the configured owner chat. Inbox history is stored in `BOT_DATA_DIR/telegram-inbox.json` and capped at 1,000 messages. Set `TELEGRAM_RESTART_NOTIFICATION_CHAT_ID` to the ID returned by the **Chat ID** button; owner features are disabled until that ID is valid and only that private chat can use them. Set tokens and API hashes directly in Railway Variables. Only one service should poll a bot token at a time.
 
 The service does not need a public domain to poll Telegram. If you add one, the only HTTP route exposed by this app is the health check.
 
@@ -90,7 +90,7 @@ For supported sites that require an authenticated session, export a Netscape-for
 
 - Accepts Telegram video uploads up to 4 GB.
 - Accepts direct public HTTP/HTTPS download links and supported public video pages up to 5 GB.
-- ZIP archives are not supported. Extract videos before sending or linking them.
+- Direct public ZIP download links are sent back unchanged as Telegram documents up to 1.9 GB. The bot does not extract them; extract the video and send it back to compress. Direct downloads are checked by ZIP signature, including links without a `.zip` filename.
 - Uses yt-dlp for public HLS/DASH manifests and supported video pages, including common extractors for YouTube, TikTok, Instagram, Facebook, X, Reddit, and Vimeo. Coverage changes with site behavior and yt-dlp versions; this is not support for every website.
 - Prefers MP4 video/audio formats when available and merges separate streams. Progress includes yt-dlp download progress plus output-size monitoring. Login-required, geo-restricted, rate-limited, unsupported, inaccessible, and DRM-protected sources have distinct user-facing outcomes.
 - A configured Netscape cookies file can be used only for content the associated account is allowed to view. Private or login-only content may still be inaccessible, and DRM-protected media remains unsupported.
@@ -103,7 +103,8 @@ For supported sites that require an authenticated session, export a Netscape-for
 - Reports the compressed output size and returns an MP4 smaller than Telegram's 1.9 GB delivery limit, keeping the source filename when available (`compressed-video.mp4` otherwise).
 - Sends each compressed video as a reply to the exact original upload or link message; includes the source URL in the caption when it fits.
 - Accepts up to 11 outstanding videos across the bot (one active plus up to 10 queued, prepared, or preparing), compresses one video at a time, and limits each Telegram user to six submissions per rolling hour and 20 per rolling 24 hours. Other videos wait in a bounded FIFO queue; the 30-minute selection timeout does not apply after a video is queued.
-- `/status` shows active, queued, prepared, or downloading work. `/cancel` cancels the next waiting item; `/cancel active` stops the current compression.
+- Provides the same persistent button menu to every user for Help, Status, Cancel waiting, Stop active, Chat ID, Runtime settings, and Open inbox. Runtime settings and Open inbox actions remain restricted to the configured owner chat. Typed slash commands remain supported as compatibility fallbacks.
+- Status shows active, queued, prepared, or downloading work. Cancel waiting removes the next waiting item; Stop active halts the current compression.
 - Queue and rate-limit state are in memory. Restarts cancel pending and active jobs and reset the hourly/daily quotas. A startup and 30-minute cleanup sweep removes untracked job artifacts older than two hours while preserving files referenced by the current queue. Telegram's own `api-temp` directory is left to the local Bot API server.
 
 ## Source layout
