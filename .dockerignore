@@ -14,5 +14,7 @@ node_modules
 **/*.tsbuildinfo
 .cache
 .local
+/.agents
+/attached_assets
 tmp
 coverage

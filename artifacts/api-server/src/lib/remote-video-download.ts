@@ -6,6 +6,11 @@ import { open, unlink } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { request as httpsRequest } from "node:https";
+import {
+  createDownloadDeadline,
+  DEFAULT_REMOTE_DOWNLOAD_TIMEOUT_MS,
+  waitForWithAbort,
+} from "./download-deadline.ts";
 import { VIDEO_INPUT_LIMIT_LABEL } from "./video-limits.ts";
 
 const MAX_REDIRECTS = 5;
@@ -83,9 +88,9 @@ export async function isZipArchiveFile(filePath: string): Promise<boolean> {
   }
 }
 export class RemoteVideoDownloadError extends Error {
-  readonly code: "input_too_large" | undefined;
+  readonly code: "input_too_large" | "timeout" | undefined;
 
-  constructor(message: string, code?: "input_too_large") {
+  constructor(message: string, code?: "input_too_large" | "timeout") {
     super(message);
     this.name = "RemoteVideoDownloadError";
     this.code = code;
@@ -376,7 +381,10 @@ async function downloadRedirects(
   onProgress: (progress: DownloadProgress) => void,
   redirectsRemaining: number,
 ): Promise<number> {
-  const address = await resolvePublicAddress(url);
+  if (signal.aborted) {
+    throw new RemoteVideoDownloadError("Download cancelled.");
+  }
+  const address = await waitForWithAbort(resolvePublicAddress(url), signal);
   const response = await requestRemoteFile(url, address, signal);
 
   if (
@@ -547,8 +555,13 @@ export async function downloadRemoteVideo(
     zipLimitMessage?: string;
     signal: AbortSignal;
     onProgress: (progress: DownloadProgress) => void;
+    timeoutMs?: number;
   },
 ): Promise<number> {
+  const deadline = createDownloadDeadline(
+    options.signal,
+    options.timeoutMs ?? DEFAULT_REMOTE_DOWNLOAD_TIMEOUT_MS,
+  );
   try {
     return await downloadRedirects(
       parseDownloadUrl(value),
@@ -556,18 +569,26 @@ export async function downloadRemoteVideo(
       options.maxBytes,
       options.maxBytesForZip,
       options.zipLimitMessage,
-      options.signal,
+      deadline.signal,
       options.onProgress,
       MAX_REDIRECTS,
     );
   } catch (error) {
     await unlink(destination).catch(() => undefined);
-    if (error instanceof RemoteVideoDownloadError) throw error;
     if (options.signal.aborted) {
       throw new RemoteVideoDownloadError("Download cancelled.");
     }
+    if (deadline.didTimeout()) {
+      throw new RemoteVideoDownloadError(
+        "The video download exceeded its maximum time limit. Try a faster link or upload the video directly.",
+        "timeout",
+      );
+    }
+    if (error instanceof RemoteVideoDownloadError) throw error;
     throw new RemoteVideoDownloadError(
       "The video could not be downloaded from that link.",
     );
+  } finally {
+    deadline.dispose();
   }
 }

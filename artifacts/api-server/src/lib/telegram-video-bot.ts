@@ -11,6 +11,11 @@ import { retryWithBackoff } from "./retry-with-backoff";
 import { buildCompressionResultCaption } from "./compression-result-caption";
 import { getNextPendingVideoExpiry } from "./pending-video-expiration";
 import { removeStaleJobArtifacts } from "./job-artifact-cleanup";
+import { removeOwnedFile } from "./owned-file-cleanup";
+import {
+  watchCriticalChildProcessFailure,
+  type CriticalChildFailure,
+} from "./critical-child-process";
 import {
   canAcceptVideo,
   MAX_OUTSTANDING_VIDEOS,
@@ -618,6 +623,7 @@ async function prepareVideo(
 
     const localFile = await stat(fetched.file_path).catch(() => null);
     if (!localFile?.isFile()) {
+      await removeOwnedInput(fetched.file_path);
       await editMessage(
         message.chat.id,
         status.message_id,
@@ -626,6 +632,7 @@ async function prepareVideo(
       return;
     }
     if (localFile.size > videoLimits.maxTelegramUploadBytes) {
+      await removeOwnedInput(fetched.file_path);
       await editMessage(
         message.chat.id,
         status.message_id,
@@ -1120,15 +1127,7 @@ function describeCompressionStatus(job: ActiveJob): string {
 }
 
 async function removeOwnedInput(filePath: string): Promise<void> {
-  const resolvedFile = path.resolve(filePath);
-  const ownedRoots = [BOT_API_DATA_DIR, JOBS_DIR].map((root) =>
-    path.resolve(root),
-  );
-  if (
-    ownedRoots.some((root) => resolvedFile.startsWith(`${root}${path.sep}`))
-  ) {
-    await unlink(resolvedFile).catch(() => undefined);
-  }
+  await removeOwnedFile(filePath, [BOT_API_DATA_DIR, JOBS_DIR]);
 }
 
 function clearExpiredPendingVideos(): void {
@@ -2172,7 +2171,9 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   }
 }
 
-function startLocalBotApi(): ChildProcess {
+function startLocalBotApi(
+  onFailure: (failure: CriticalChildFailure) => void,
+): ChildProcess {
   const child = spawn(
     "telegram-bot-api",
     [
@@ -2204,17 +2205,7 @@ function startLocalBotApi(): ChildProcess {
     },
   );
 
-  child.once("error", () => {
-    logger.error("Could not start Telegram's local Bot API server.");
-  });
-  child.once("exit", (code, signal) => {
-    if (!stopping) {
-      logger.error(
-        { code, signal },
-        "Telegram's local Bot API server stopped unexpectedly.",
-      );
-    }
-  });
+  watchCriticalChildProcessFailure(child, () => stopping, onFailure);
   return child;
 }
 
@@ -2315,7 +2306,9 @@ async function pollUpdates(): Promise<void> {
   }
 }
 
-export async function startTelegramVideoBot(): Promise<() => void> {
+export async function startTelegramVideoBot(
+  onLocalApiFailure: (failure: CriticalChildFailure) => void,
+): Promise<() => void> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   const apiId = process.env["TELEGRAM_API_ID"];
   const apiHash = process.env["TELEGRAM_API_HASH"];
@@ -2345,7 +2338,7 @@ export async function startTelegramVideoBot(): Promise<() => void> {
   startJobArtifactCleanup();
 
   try {
-    localApiProcess = startLocalBotApi();
+    localApiProcess = startLocalBotApi(onLocalApiFailure);
     const bot = await waitForLocalApi(localApiProcess);
     const webhook = await telegramCall<{ url: string }>("getWebhookInfo");
     if (webhook.url) {

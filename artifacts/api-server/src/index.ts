@@ -5,20 +5,11 @@ import {
   stopTelegramVideoBot,
 } from "./lib/telegram-video-bot";
 import { setApplicationReady } from "./lib/readiness";
+import { parseServerPort } from "./lib/server-port";
 
 const rawPort = process.env["PORT"];
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
-
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
+const port = parseServerPort(rawPort);
 
 let shuttingDown = false;
 
@@ -50,7 +41,25 @@ const server = app.listen(port, (err) => {
     return;
   }
 
-  void startTelegramVideoBot()
+  void startTelegramVideoBot((failure) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    setApplicationReady(false);
+    stopTelegramVideoBot();
+
+    if (failure.type === "error") {
+      logger.fatal(
+        { code: failure.error.name },
+        "Telegram's local Bot API server could not be started; restarting service",
+      );
+    } else {
+      logger.fatal(
+        { code: failure.code, signal: failure.signal },
+        "Telegram's local Bot API server stopped unexpectedly; restarting service",
+      );
+    }
+    server.close(() => process.exit(1));
+  })
     .then(() => {
       if (!shuttingDown) setApplicationReady(true);
     })
