@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { stat, unlink } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { mkdir, readdir, stat, unlink } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import {
   buildSceneRemovalFilters,
   createSceneRemovalPlan,
@@ -19,6 +19,8 @@ import {
 const MAX_COMPRESSION_DURATION_MS = 12 * 60 * 60 * 1_000;
 const MAX_PROBE_DURATION_MS = 5 * 60 * 1_000;
 const FORCE_KILL_GRACE_MS = 5_000;
+const LOSSLESS_PART_TARGET_BYTES = Math.floor(MAX_TELEGRAM_OUTPUT_BYTES * 0.88);
+const MAX_LOSSLESS_SPLIT_ATTEMPTS = 4;
 
 export type VideoResolution = {
   label: string;
@@ -105,6 +107,11 @@ export type CompressionResult = {
   removedSceneSeconds?: number;
 };
 
+export type LosslessVideoPart = {
+  outputPath: string;
+  outputBytes: number;
+};
+
 export type CompressionProgress = {
   attempt: number;
   totalAttempts: number;
@@ -123,6 +130,7 @@ export class VideoProcessingError extends Error {
       | "output_not_smaller"
       | "cancelled"
       | "timeout"
+      | "split_failed"
       | "processing_failed",
   ) {
     super(message);
@@ -405,6 +413,157 @@ export function getSmallerPresetResolutions(
           output.height < targetDimensions.height)
       );
     },
+  );
+}
+
+export function getLosslessSplitPlan(
+  sourceBytes: number,
+  durationSeconds: number,
+  targetPartBytes = LOSSLESS_PART_TARGET_BYTES,
+): { partCount: number; segmentDurationSeconds: number } | null {
+  if (
+    !Number.isSafeInteger(sourceBytes) ||
+    sourceBytes <= MAX_TELEGRAM_OUTPUT_BYTES ||
+    !Number.isFinite(durationSeconds) ||
+    durationSeconds <= 0 ||
+    !Number.isSafeInteger(targetPartBytes) ||
+    targetPartBytes <= 0
+  ) {
+    return null;
+  }
+
+  const partCount = Math.max(2, Math.ceil(sourceBytes / targetPartBytes));
+  return {
+    partCount,
+    segmentDurationSeconds: durationSeconds / partCount,
+  };
+}
+
+export async function splitVideoLosslessly(options: {
+  inputPath: string;
+  outputDirectory: string;
+  durationSeconds: number;
+  onProcess: (child: ChildProcess | null) => void;
+  isCancelled?: () => boolean;
+}): Promise<LosslessVideoPart[]> {
+  if (!isAbsolute(options.inputPath)) {
+    throw new VideoProcessingError(
+      "Telegram did not provide a usable local video file.",
+      "invalid_video",
+    );
+  }
+
+  const input = await stat(options.inputPath).catch(() => null);
+  if (!input?.isFile()) {
+    throw new VideoProcessingError(
+      "Telegram could not access the original video.",
+      "invalid_video",
+    );
+  }
+  if (input.size > MAX_VIDEO_INPUT_BYTES) {
+    throw new VideoProcessingError(
+      `This video exceeds the ${VIDEO_INPUT_LIMIT_LABEL} processing limit.`,
+      "input_too_large",
+    );
+  }
+
+  await mkdir(options.outputDirectory, { recursive: true });
+  let targetPartBytes = LOSSLESS_PART_TARGET_BYTES;
+
+  for (let attempt = 0; attempt < MAX_LOSSLESS_SPLIT_ATTEMPTS; attempt += 1) {
+    if (options.isCancelled?.()) {
+      throw new VideoProcessingError(
+        "Original video splitting was cancelled.",
+        "cancelled",
+      );
+    }
+
+    const plan = getLosslessSplitPlan(
+      input.size,
+      options.durationSeconds,
+      targetPartBytes,
+    );
+    if (!plan) {
+      throw new VideoProcessingError(
+        "The original video does not need to be split.",
+        "split_failed",
+      );
+    }
+
+    const outputNames = (await readdir(options.outputDirectory)).filter(
+      (name) => /^original-part-\d{3}\.mkv$/u.test(name),
+    );
+    await Promise.all(
+      outputNames.map((name) => unlink(join(options.outputDirectory, name))),
+    );
+
+    try {
+      await runProcess(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-nostdin",
+          "-y",
+          "-i",
+          options.inputPath,
+          "-map",
+          "0:v:0",
+          "-map",
+          "0:a?",
+          "-c",
+          "copy",
+          "-f",
+          "segment",
+          "-segment_time",
+          String(plan.segmentDurationSeconds),
+          "-reset_timestamps",
+          "1",
+          "-segment_format",
+          "matroska",
+          join(options.outputDirectory, "original-part-%03d.mkv"),
+        ],
+        options.onProcess,
+        undefined,
+        MAX_COMPRESSION_DURATION_MS,
+      );
+    } finally {
+      options.onProcess(null);
+    }
+
+    if (options.isCancelled?.()) {
+      throw new VideoProcessingError(
+        "Original video splitting was cancelled.",
+        "cancelled",
+      );
+    }
+
+    const partNames = (await readdir(options.outputDirectory))
+      .filter((name) => /^original-part-\d{3}\.mkv$/u.test(name))
+      .sort();
+    const parts = await Promise.all(
+      partNames.map(async (name) => ({
+        outputPath: join(options.outputDirectory, name),
+        outputBytes: (await stat(join(options.outputDirectory, name))).size,
+      })),
+    );
+    if (
+      parts.length >= 2 &&
+      parts.every(
+        (part) =>
+          part.outputBytes > 0 && part.outputBytes <= MAX_TELEGRAM_OUTPUT_BYTES,
+      )
+    ) {
+      return parts;
+    }
+
+    targetPartBytes = Math.floor(targetPartBytes * 0.8);
+  }
+
+  throw new VideoProcessingError(
+    "The original video could not be split into Telegram-sized parts at its existing keyframes without re-encoding.",
+    "split_failed",
   );
 }
 
