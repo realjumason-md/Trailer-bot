@@ -1,708 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { FifoQueue } from "./fifo-queue";
-import { logger } from "./logger";
-import { compressedVideoFileName } from "./compressed-video-file-name";
-import { retryWithBackoff } from "./retry-with-backoff";
-import { buildCompressionResultCaption } from "./compression-result-caption";
-import { getNextPendingVideoExpiry } from "./pending-video-expiration";
-import { removeStaleJobArtifacts } from "./job-artifact-cleanup";
-import {
-  canAcceptVideo,
-  MAX_OUTSTANDING_VIDEOS,
-  MAX_WAITING_COMPRESSIONS,
-} from "./video-queue-limits";
-import {
-  MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR,
-  MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY,
-  recordVideoSubmission,
-} from "./video-submission-limits";
-import { parseRestartNotificationChatId } from "./restart-notification";
-import {
-  MAX_TELEGRAM_INBOX_MESSAGES,
-  TelegramInboxStore,
-  type TelegramInboxMessage,
-} from "./telegram-inbox";
-import {
-  telegramBotMenuCommand,
-  telegramBotMenuKeyboard,
-  TELEGRAM_BOT_MENU_BUTTONS,
-} from "./telegram-bot-menu";
-import {
-  buildRailwayDeploymentChecklist,
-  isAuthorizedRailwayVarsChat,
-} from "./railway-deployment-checklist";
-import {
-  downloadRemoteVideo,
-  findHttpUrl,
-  isZipArchiveFile,
-  isZipArchiveUrl,
-  RemoteVideoDownloadError,
-} from "./remote-video-download";
-import {
-  downloadTikTokVideo,
-  downloadPublicSiteVideo,
-  findTikTokUrl,
-  getCookiesRuntimeStatus,
-  getVideoSiteName,
-  isStreamingManifestUrl,
-  publicVideoFailureMessage,
-  TikTokDownloadError,
-  tiktokFailureMessage,
-} from "./tiktok-link-handler";
-import {
-  compressVideo,
-  COMPRESSION_CRF_LEVELS,
-  estimateRemainingSeconds,
-  getAvailablePresetResolutions,
-  getOutputDimensions,
-  getSameResolutionResolution,
-  getSmallerPresetResolutions,
-  SAME_RESOLUTION_CHOICE,
-  SAME_RESOLUTION_COMPRESSION_CRF_LEVELS,
-  inspectVideoInfo,
-  isRetryableResolutionError,
-  parseCustomResolution,
-  VideoProcessingError,
-  videoLimits,
-  PRESET_RESOLUTIONS,
-  type CompressionProgress,
-  type VideoInfo,
-  type VideoResolution,
-} from "./video-processing";
-
-type TelegramApiResponse<T> = {
-  ok: boolean;
-  result?: T;
-  error_code?: number;
-  description?: string;
-  parameters?: { retry_after?: number };
-};
-
-class TelegramApiError extends Error {
-  constructor(
-    readonly apiCode: number,
-    method: string,
-  ) {
-    super(`Telegram API ${method} failed (${apiCode}).`);
-  }
-}
-
-class TelegramTransportError extends Error {
-  constructor(
-    readonly method: string,
-    readonly reason: string,
-    readonly causeCode?: string,
-  ) {
-    super(`Telegram ${method} request failed.`);
-  }
-}
-
-type TelegramUser = {
-  id: number;
-  first_name?: string;
-  username?: string;
-};
-
-type TelegramFile = {
-  file_id: string;
-  file_size?: number;
-  file_name?: string;
-  mime_type?: string;
-  duration?: number;
-  width?: number;
-  height?: number;
-};
-
-type TelegramChat = {
-  id: number;
-  type?: string;
-};
-
-type TelegramMessage = {
-  message_id: number;
-  date?: number;
-  chat: TelegramChat;
-  from?: TelegramUser;
-  text?: string;
-  caption?: string;
-  reply_to_message?: { message_id: number };
-  video?: TelegramFile;
-  document?: TelegramFile;
-  animation?: TelegramFile;
-  audio?: TelegramFile;
-  voice?: TelegramFile;
-  video_note?: TelegramFile;
-  photo?: TelegramFile[];
-  sticker?: TelegramFile;
-  contact?: unknown;
-  location?: unknown;
-  venue?: unknown;
-  poll?: unknown;
-};
-
-type TelegramCallbackQuery = {
-  id: string;
-  from: TelegramUser;
-  message?: TelegramMessage;
-  data?: string;
-};
-
-type TelegramUpdate = {
-  update_id: number;
-  message?: TelegramMessage;
-  callback_query?: TelegramCallbackQuery;
-};
-
-type PendingVideo = {
-  id: string;
-  key: string;
-  chatId: number;
-  sourceMessageId: number;
-  sourceUrl?: string;
-  fileSize: number;
-  fileName: string;
-  filePath: string;
-  statusMessageId: number;
-  // This deadline applies only while a resolution choice is waiting from the user.
-  // A selected video stays valid in the compression queue, and unresolved choices
-  // get their deadline extended while a compression is active or queued.
-  expiresAt: number;
-  durationSeconds?: number;
-  sourceWidth: number;
-  sourceHeight: number;
-  awaitingCustomResolution?: boolean;
-};
-
-type PreparingVideo = {
-  id: string;
-  key: string;
-  chatId: number;
-  source: "upload" | "url" | "tiktok";
-  filePath?: string;
-  fileSize?: number;
-  durationSeconds?: number;
-  statusMessageId?: number;
-  startedAt: number;
-  cancelled: boolean;
-  abortController?: AbortController;
-  child?: ChildProcess | null;
-};
-
-type QueueEntry = {
-  pending: PendingVideo;
-  resolution: VideoResolution;
-};
-
-type ActiveJob = {
-  videoId: string;
-  key: string;
-  chatId: number;
-  inputPath: string;
-  outputDirectory?: string;
-  cancelled: boolean;
-  child: ChildProcess | null;
-  resolution: string;
-  sourceBytes: number;
-  statusText: string;
-  attempt: number;
-  totalAttempts: number;
-  progressPercent: number;
-  etaDeadlineAt: number | null;
-  attemptStartedAt: number;
-};
-
-const LOCAL_API_PORT = Number(
-  process.env["TELEGRAM_LOCAL_API_PORT"] ?? "18081",
-);
-const LOCAL_API_ROOT = `http://127.0.0.1:${LOCAL_API_PORT}`;
-const BOT_DATA_DIR = path.resolve(
-  process.env["BOT_DATA_DIR"] ?? path.join(tmpdir(), "telegram-video-bot"),
-);
-const BOT_API_DATA_DIR = path.join(BOT_DATA_DIR, "api-data");
-const BOT_API_TEMP_DIR = path.join(BOT_DATA_DIR, "api-temp");
-const JOBS_DIR = path.join(BOT_DATA_DIR, "jobs");
-const telegramInbox = new TelegramInboxStore(
-  path.join(BOT_DATA_DIR, "telegram-inbox.json"),
-);
-const pendingInboxReplies = new Map<
-  number,
-  { userId: number; promptMessageId: number }
->();
-const INBOX_USERS_PER_PAGE = 8;
-const PENDING_TTL_MS = 30 * 60 * 1000;
-const LONG_TELEGRAM_FILE_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
-const JOB_ARTIFACT_CLEANUP_INTERVAL_MS = 30 * 60 * 1_000;
-const videoSubmissions = new Map<number, number[]>();
-
-let botToken = "";
-let stopping = false;
-let localApiProcess: ChildProcess | null = null;
-let activeJob: ActiveJob | null = null;
-const pendingVideos = new Map<string, PendingVideo>();
-const preparingVideos = new Map<string, PreparingVideo>();
-const compressionQueue = new FifoQueue<QueueEntry>(MAX_WAITING_COMPRESSIONS);
-let jobArtifactCleanupTimer: NodeJS.Timeout | null = null;
-
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function errorName(error: unknown): string {
-  if (error instanceof VideoProcessingError) return error.code;
-  if (error instanceof TikTokDownloadError) return `tiktok_${error.code}`;
-  if (error instanceof TelegramApiError) {
-    return `telegram_api_${error.apiCode}`;
-  }
-  if (error instanceof TelegramTransportError) {
-    return `telegram_${error.method}_${error.reason}${
-      error.causeCode ? `_${error.causeCode}` : ""
-    }`;
-  }
-  if (error instanceof Error) return error.name;
-  return "unknown_error";
-}
-
-function makeSessionKey(chatId: number, userId: number): string {
-  return `${chatId}:${userId}`;
-}
-
-function localBotApiUrl(method: string): string {
-  return `${LOCAL_API_ROOT}/bot${botToken}/${method}`;
-}
-
-function transportCauseCode(error: unknown): string | undefined {
-  if (!(error instanceof Error) || error.cause == null) return undefined;
-  const cause = error.cause;
-  if (typeof cause !== "object" || !("code" in cause)) return undefined;
-  const code = cause.code;
-  return typeof code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(code)
-    ? code
-    : undefined;
-}
-
-async function telegramCall<T>(
-  method: string,
-  payload: Record<string, unknown> = {},
-  timeoutMs = 45_000,
-  signal?: AbortSignal,
-): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(localBotApiUrl(method), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
-        : AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    throw new TelegramTransportError(
-      method,
-      error instanceof Error ? error.name : "unknown_error",
-      transportCauseCode(error),
-    );
-  }
-
-  const data = (await response
-    .json()
-    .catch(() => null)) as TelegramApiResponse<T> | null;
-  if (!response.ok || !data?.ok || data.result === undefined) {
-    const code = data?.error_code ?? response.status;
-    throw new TelegramApiError(code, method);
-  }
-  return data.result;
-}
-
-async function sendMessage(
-  chatId: number,
-  text: string,
-  replyMarkup?: Record<string, unknown>,
-): Promise<TelegramMessage> {
-  return telegramCall<TelegramMessage>("sendMessage", {
-    chat_id: chatId,
-    text,
-    reply_markup: replyMarkup ?? telegramBotMenuKeyboard(),
-    disable_web_page_preview: true,
-  });
-}
-
-async function editMessage(
-  chatId: number,
-  messageId: number,
-  text: string,
-  replyMarkup?: Record<string, unknown>,
-): Promise<void> {
-  await telegramCall("editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-  });
-}
-
-async function answerCallback(
-  callbackId: string,
-  text?: string,
-): Promise<void> {
-  await telegramCall("answerCallbackQuery", {
-    callback_query_id: callbackId,
-    ...(text ? { text } : {}),
-  });
-}
-
-function resolutionKeyboard(
-  sourceWidth: number,
-  sourceHeight: number,
-  excludedResolution?: string,
-  smallerThan?: VideoResolution,
-): Record<string, unknown> {
-  const availableResolutions = smallerThan
-    ? getSmallerPresetResolutions(sourceWidth, sourceHeight, smallerThan)
-    : getAvailablePresetResolutions(sourceWidth, sourceHeight);
-  const resolutions = [
-    ...(smallerThan
-      ? []
-      : [
-          {
-            text: `Original ${sourceWidth}×${sourceHeight}`,
-            callback_data: `resolution:${SAME_RESOLUTION_CHOICE}`,
-          },
-        ]),
-    ...availableResolutions
-      .filter((resolution) => resolution.label !== excludedResolution)
-      .map((resolution) => ({
-        text: resolution.label,
-        callback_data: `resolution:${resolution.label}`,
-      })),
-  ];
-  return {
-    inline_keyboard: [
-      ...resolutions.map((resolution) => [resolution]),
-      [{ text: "Custom resolution", callback_data: "resolution:custom" }],
-      [{ text: "Cancel", callback_data: "resolution:cancel" }],
-    ],
-  };
-}
-
-function findResolution(value: string): VideoResolution | null {
-  return (
-    PRESET_RESOLUTIONS.find((resolution) => resolution.label === value) ??
-    parseCustomResolution(value)
-  );
-}
-
-function reducesSourceDimensions(
-  pending: PendingVideo,
-  resolution: VideoResolution,
-): boolean {
-  const output = getOutputDimensions(
-    pending.sourceWidth,
-    pending.sourceHeight,
-    resolution,
-  );
-  return (
-    output.width < pending.sourceWidth || output.height < pending.sourceHeight
-  );
-}
-
-function pendingForSession(key: string): PendingVideo[] {
-  return [...pendingVideos.values()].filter((pending) => pending.key === key);
-}
-
-function preparationsForSession(key: string): PreparingVideo[] {
-  return [...preparingVideos.values()].filter(
-    (preparation) => preparation.key === key,
-  );
-}
-
-function outstandingVideoCount(): number {
-  const ids = new Set([
-    ...pendingVideos.keys(),
-    ...preparingVideos.keys(),
-    ...compressionQueue.toArray().map((entry) => entry.pending.id),
-  ]);
-  if (activeJob) ids.add(activeJob.videoId);
-  return ids.size;
-}
-
-function canPrepareAnotherVideo(chatId: number): boolean {
-  if (!canAcceptVideo(outstandingVideoCount())) {
-    void sendMessage(
-      chatId,
-      "The video queue is full. Please wait for one of the current videos to finish.",
-    ).catch(() => undefined);
-    return false;
-  }
-  return true;
-}
-
-function trackedJobArtifactPaths(): string[] {
-  const paths = [
-    ...[...pendingVideos.values()].map((video) => video.filePath),
-    ...[...preparingVideos.values()].flatMap((preparation) =>
-      preparation.filePath ? [preparation.filePath] : [],
-    ),
-    ...compressionQueue.toArray().map((entry) => entry.pending.filePath),
-  ];
-  if (activeJob) {
-    paths.push(activeJob.inputPath);
-    if (activeJob.outputDirectory) paths.push(activeJob.outputDirectory);
-  }
-  return paths;
-}
-
-async function cleanupOrphanedJobFiles(): Promise<void> {
-  try {
-    const removed = await removeStaleJobArtifacts(
-      JOBS_DIR,
-      trackedJobArtifactPaths(),
-    );
-    if (removed > 0) {
-      logger.info({ removed }, "Removed stale video job artifacts");
-    }
-  } catch (error) {
-    logger.warn(
-      { code: errorName(error) },
-      "Could not clean stale video job artifacts",
-    );
-  }
-}
-
-function startJobArtifactCleanup(): void {
-  if (jobArtifactCleanupTimer) clearInterval(jobArtifactCleanupTimer);
-  jobArtifactCleanupTimer = setInterval(
-    () => void cleanupOrphanedJobFiles(),
-    JOB_ARTIFACT_CLEANUP_INTERVAL_MS,
-  );
-  jobArtifactCleanupTimer.unref();
-}
-
-function canSubmitVideo(chatId: number, userId: number): boolean {
-  const result = recordVideoSubmission(videoSubmissions, userId);
-  if (result.allowed) return true;
-
-  const retryMinutes = Math.max(1, Math.ceil(result.retryAfterMs / 60_000));
-  const limitName = result.limit === "hour" ? "per hour" : "per day";
-  const limitCount =
-    result.limit === "hour"
-      ? MAX_VIDEO_SUBMISSIONS_PER_USER_PER_HOUR
-      : MAX_VIDEO_SUBMISSIONS_PER_USER_PER_DAY;
-  void sendMessage(
-    chatId,
-    `You’ve reached the limit of ${limitCount} video submissions ${limitName}. Please try again in about ${retryMinutes} minute${retryMinutes === 1 ? "" : "s"}.`,
-  ).catch(() => undefined);
-  return false;
-}
-
-async function prepareVideo(
-  message: TelegramMessage,
-  file: TelegramFile,
-): Promise<void> {
-  const userId = message.from?.id;
-  if (userId == null) return;
-  const key = makeSessionKey(message.chat.id, userId);
-  if (!canPrepareAnotherVideo(message.chat.id)) return;
-
-  if (
-    file.file_size != null &&
-    file.file_size > videoLimits.maxTelegramUploadBytes
-  ) {
-    await sendMessage(
-      message.chat.id,
-      `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
-    );
-    return;
-  }
-  if (!canSubmitVideo(message.chat.id, userId)) return;
-
-  const id = randomUUID();
-  const preparation: PreparingVideo = {
-    id,
-    key,
-    chatId: message.chat.id,
-    source: "upload",
-    fileSize: file.file_size,
-    durationSeconds: file.duration,
-    startedAt: Date.now(),
-    cancelled: false,
-  };
-  preparingVideos.set(id, preparation);
-  try {
-    const reportedSize =
-      file.file_size == null ? "" : ` (${formatBytes(file.file_size)})`;
-    const reportedDuration =
-      file.duration != null ? ` · ${formatDuration(file.duration)}` : "";
-    const status = await sendMessage(
-      message.chat.id,
-      `Video received${reportedSize}${reportedDuration}. Preparing the upload. Compression starts after you choose a resolution; I’ll estimate the time as it encodes.`,
-      telegramBotMenuKeyboard(),
-    );
-    preparation.statusMessageId = status.message_id;
-
-    let fetched: { file_path?: string };
-    try {
-      fetched = await retryWithBackoff(
-        () =>
-          telegramCall<{ file_path?: string }>(
-            "getFile",
-            { file_id: file.file_id },
-            LONG_TELEGRAM_FILE_TIMEOUT_MS,
-          ),
-        {
-          maxAttempts: 3,
-          delayMs: (failedAttempt) => failedAttempt * 500,
-          shouldRetry: (error) =>
-            error instanceof TelegramTransportError ||
-            (error instanceof TelegramApiError && error.apiCode >= 500),
-          onRetry: (error, nextAttempt, delayMilliseconds) => {
-            logger.warn(
-              {
-                code: errorName(error),
-                attempt: nextAttempt,
-                delayMilliseconds,
-              },
-              "Telegram getFile failed transiently; retrying upload preparation",
-            );
-          },
-        },
-      );
-    } catch (error) {
-      logger.warn(
-        { code: errorName(error) },
-        "Could not prepare an uploaded video",
-      );
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "Telegram couldn't retrieve this upload, so it didn't enter the compression queue. It didn't cancel any other video. Please send it again or try a direct video link.",
-      ).catch(() => undefined);
-      return;
-    }
-
-    if (preparation.cancelled) {
-      if (fetched.file_path) await removeOwnedInput(fetched.file_path);
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "Upload preparation cancelled.",
-      ).catch(() => undefined);
-      return;
-    }
-
-    if (!fetched.file_path || !path.isAbsolute(fetched.file_path)) {
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "Telegram did not return a local video file. The local Bot API server must be running for large uploads.",
-      );
-      return;
-    }
-    if (
-      !path
-        .resolve(fetched.file_path)
-        .startsWith(`${path.resolve(BOT_API_DATA_DIR)}${path.sep}`)
-    ) {
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "The local Bot API server returned a file outside its configured storage. Please check its file storage settings.",
-      );
-      return;
-    }
-
-    const localFile = await stat(fetched.file_path).catch(() => null);
-    if (!localFile?.isFile()) {
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "Telegram could not access the uploaded video. Please send it again.",
-      );
-      return;
-    }
-    if (localFile.size > videoLimits.maxTelegramUploadBytes) {
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        `This bot accepts Telegram video uploads up to ${videoLimits.maxTelegramUploadSizeLabel}.`,
-      );
-      return;
-    }
-    preparation.fileSize = localFile.size;
-
-    await editMessage(
-      message.chat.id,
-      status.message_id,
-      `Video received (${formatBytes(localFile.size)}). Checking its actual resolution before showing compression choices.`,
-    ).catch(() => undefined);
-    let sourceInfo: VideoInfo;
-    try {
-      sourceInfo = await inspectVideoInfo(fetched.file_path, (child) => {
-        preparation.child = child;
-        if (preparation.cancelled && child) child.kill("SIGTERM");
-      });
-    } catch (error) {
-      await removeOwnedInput(fetched.file_path);
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        preparation.cancelled
-          ? "Upload preparation cancelled."
-          : error instanceof VideoProcessingError
-            ? error.message
-            : "This file does not contain a readable video stream.",
-      ).catch(() => undefined);
-      return;
-    }
-    if (preparation.cancelled) {
-      await removeOwnedInput(fetched.file_path);
-      await editMessage(
-        message.chat.id,
-        status.message_id,
-        "Upload preparation cancelled.",
-      ).catch(() => undefined);
-      return;
-    }
-
-    const pending: PendingVideo = {
-      id,
-      key,
-      chatId: message.chat.id,
-      sourceMessageId: message.message_id,
-      fileSize: localFile.size,
-      fileName: file.file_name ?? "",
-      filePath: fetched.file_path,
-      statusMessageId: status.message_id,
-      expiresAt: Date.now() + PENDING_TTL_MS,
-      durationSeconds: sourceInfo.durationSeconds,
-      sourceWidth: sourceInfo.width,
-      sourceHeight: sourceInfo.height,
-    };
-    const presetChoices = getAvailablePresetResolutions(
-      sourceInfo.width,
-      sourceInfo.height,
-    );
-    pendingVideos.set(id, pending);
-    const readyMessage =
-      presetChoices.length === 0
-        ? `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. No lower preset is available. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling, or Custom resolution to reduce dimensions.`
-        : `Video ready · original ${sourceInfo.width}×${sourceInfo.height} · ${formatBytes(localFile.size)}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or a lower output resolution. Custom resolution is also available.`;
-    await editMessage(
-      message.chat.id,
-      status.message_id,
-      readyMessage,
-      resolutionKeyboard(sourceInfo.width, sourceInfo.height),
-    ).catch(async (error: unknown) => {
-      logger.warn(
-        { code: errorName(error) },
-        "Could not update the uploaded-video status message",
-      );
-      const fallback = await sendMessage(
+    const fallback = await sendMessage(
         message.chat.id,
         `Your video is ready · original ${sourceInfo.width}×${sourceInfo.height}. Choose Original ${sourceInfo.width}×${sourceInfo.height} to compress without downscaling or one of the lower sizes below. If no button appears, send a smaller custom size such as 360p or 640x360.`,
         resolutionKeyboard(sourceInfo.width, sourceInfo.height),
@@ -770,10 +66,10 @@ async function prepareVideoFromUrl(
     const status = await sendMessage(
       message.chat.id,
       source === "tiktok"
-        ? "Fetching this public TikTok post without signing in. You’ll choose an output resolution when the video is ready."
+        ? "Fetching this public TikTok post without signing in. Choose an output resolution when ready; oversized originals are split without re-encoding."
         : zipUrl
           ? `Downloading this public ZIP archive (maximum ${formatBytes(videoLimits.maxTelegramOutputBytes)}). It will be sent unchanged so you can extract the video.`
-          : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). You’ll choose an output resolution when the video is ready.`,
+          : `Preparing this public ${siteName} video link (maximum ${videoLimits.maxInputSizeLabel}). Choose an output resolution when ready; oversized originals are split without re-encoding.`,
     );
     preparation.statusMessageId = status.message_id;
 
@@ -957,7 +253,7 @@ async function prepareVideoFromUrl(
     await editMessage(
       message.chat.id,
       status.message_id,
-      `Video downloaded (${formatBytes(localFile.size)}). Checking its actual resolution before showing compression choices.`,
+      `Video downloaded (${formatBytes(localFile.size)}). Checking its actual resolution; oversized originals will be sent in parts without re-encoding.`,
     ).catch(() => undefined);
     const sourceInfo = await inspectVideoInfo(inputPath, (child) => {
       preparation.child = child;
@@ -996,6 +292,23 @@ async function prepareVideoFromUrl(
       sourceInfo.width,
       sourceInfo.height,
     );
+    if (
+      localFile.size > videoLimits.maxTelegramOutputBytes ||
+      presetChoices.length === 0
+    ) {
+      await sendOriginalWithoutReencoding(pending, {
+        onProcess: (child) => {
+          preparation.child = child;
+          if (preparation.cancelled && child) child.kill("SIGTERM");
+        },
+        isCancelled: () => preparation.cancelled,
+        signal: abortController.signal,
+        onOutputDirectory: (directory) => {
+          preparation.outputDirectory = directory ?? undefined;
+        },
+      });
+      return;
+    }
     pendingVideos.set(id, pending);
     const readyMessage =
       presetChoices.length === 0
@@ -1515,6 +828,7 @@ async function handleMessage(
         "A Netscape-format cookies file can help with content your signed-in account is allowed to view. Cookies are sensitive; never send them in chat. Private or login-only content still needs authorized access, and DRM-protected streams are not supported.",
         "Some sites temporarily rate-limit downloads or change their extractors. The bot reports those separately from login-required, geo-restricted, and unsupported pages.",
         "The bot shows the original dimensions, then offers same-resolution compression and lower output sizes. Same-resolution results are sent only when they are smaller than the source.",
+        "Originals above Telegram's 1.9 GB per-file limit are split at keyframes into downloadable parts without re-encoding. If no smaller preset exists, the original is sent unchanged when it fits.",
         "",
         "Use the Status button to check downloads, prepared videos, and compression. Cancel waiting removes the next waiting item; Stop active stops the current compression.",
         "The original file size stays visible while compressing; the estimated countdown updates using this video’s actual encoding speed.",
@@ -1682,14 +996,14 @@ async function handleMessage(
           preparation.statusMessageId,
           preparation.source !== "upload"
             ? "Cancelling the video download..."
-            : "Cancelling upload preparation. Telegram may take a little while to finish the transfer.",
+            : "Cancelling video preparation...",
         ).catch(() => undefined);
       }
       await sendMessage(
         message.chat.id,
         preparation.source !== "upload"
           ? "The video download is being cancelled."
-          : "Upload preparation will be cancelled when Telegram finishes the transfer.",
+          : "Video preparation is being cancelled.",
       );
       return;
     }
@@ -2105,42 +1419,53 @@ async function runCompressionJob(
         pending.sourceHeight,
         resolution,
       );
-      pending.awaitingCustomResolution = false;
-      pending.expiresAt = Date.now() + PENDING_TTL_MS;
-      pendingVideos.set(pending.id, pending);
-      retainInputForRetry = true;
+      if (smallerPresets.length === 0 || resolution.preserveSourceDimensions) {
+        await sendOriginalWithoutReencoding(pending, {
+          onProcess: (child) => {
+            job.child = child;
+            if (job.cancelled && child) child.kill("SIGTERM");
+          },
+          isCancelled: () => job.cancelled,
+          onOutputDirectory: (directory) => {
+            job.losslessOutputDirectory = directory ?? undefined;
+          },
+        });
+      } else {
+        pending.awaitingCustomResolution = false;
+        pending.expiresAt = Date.now() + PENDING_TTL_MS;
+        pendingVideos.set(pending.id, pending);
+        retainInputForRetry = true;
 
-      const sourceNote = pending.sourceUrl
-        ? pending.sourceUrl.length <= 3_000
-          ? ` Source link: ${pending.sourceUrl}`
-          : " The source link is in your original message."
-        : " The original remains in your earlier message.";
-      const message =
-        error.code === "output_not_smaller"
-          ? smallerPresets.length === 0
-            ? `No smaller file could be made at ${resolution.label}. Try a custom size below ${pending.sourceWidth}×${pending.sourceHeight}.${sourceNote}`
-            : `That target couldn't make this video smaller at high quality. Choose one of the lower resolutions or enter a custom size.`
-          : `That output is still above Telegram's size limit. Choose a lower resolution or custom size to try again.${smallerPresets.length === 0 ? sourceNote : ""}`;
-      const keyboard = resolutionKeyboard(
-        pending.sourceWidth,
-        pending.sourceHeight,
-        resolution.label,
-        resolution,
-      );
-      try {
-        await editMessage(
-          pending.chatId,
-          pending.statusMessageId,
-          message,
-          keyboard,
+        const sourceNote = pending.sourceUrl
+          ? pending.sourceUrl.length <= 3_000
+            ? ` Source link: ${pending.sourceUrl}`
+            : " The source link is in your original message."
+          : " The original remains in your earlier message.";
+        const message =
+          error.code === "output_not_smaller"
+            ? `That target couldn't make this video smaller at high quality. Choose one of the lower resolutions or enter a custom size.`
+            : `That output is still above Telegram's size limit. Choose a lower resolution or custom size to try again.${sourceNote}`;
+        const keyboard = resolutionKeyboard(
+          pending.sourceWidth,
+          pending.sourceHeight,
+          resolution.label,
+          resolution,
         );
-      } catch {
-        const fallback = await sendMessage(
-          pending.chatId,
-          message,
-          keyboard,
-        ).catch(() => undefined);
-        if (fallback) pending.statusMessageId = fallback.message_id;
+        try {
+          await editMessage(
+            pending.chatId,
+            pending.statusMessageId,
+            message,
+            keyboard,
+          );
+        } catch {
+          const fallback = await sendMessage(
+            pending.chatId,
+            message,
+            keyboard,
+          ).catch(() => undefined);
+          if (fallback) pending.statusMessageId = fallback.message_id;
+        }
       }
     } else {
       const userMessage =
