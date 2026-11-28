@@ -236,7 +236,7 @@ export function publicVideoFailureMessage(
     case "access-denied":
       return `The ${pageLabel} link was denied to the bot's server or has expired. It may still work in a browser or download app. Use a link the host permits for server downloads, or upload the video.`;
     case "extractor-missing":
-      return `yt-dlp does not currently recognize a supported extractor for that ${pageLabel}.`;
+      return `I couldn't extract a video from that ${pageLabel}. It may be a browser-only page or require sign-in. Send a direct public video link (MP4, HLS/M3U8, or DASH/MPD) or upload the video.`;
     case "rate-limited":
       return `${siteName} temporarily rate-limited this request. Wait a bit, then try again.`;
     case "format-unavailable":
