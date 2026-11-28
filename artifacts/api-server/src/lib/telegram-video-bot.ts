@@ -350,6 +350,33 @@ async function editMessage(
   });
 }
 
+async function reportPreparationFailure(
+  chatId: number,
+  statusMessageId: number | undefined,
+  text: string,
+): Promise<void> {
+  if (statusMessageId != null) {
+    try {
+      await editMessage(chatId, statusMessageId, text);
+      return;
+    } catch (error) {
+      logger.warn(
+        { code: error instanceof Error ? error.name : "unknown_error" },
+        "Could not update the preparation status; sending the failure separately",
+      );
+    }
+  }
+
+  try {
+    await sendMessage(chatId, text);
+  } catch (error) {
+    logger.error(
+      { code: error instanceof Error ? error.name : "unknown_error" },
+      "Could not send the preparation failure message",
+    );
+  }
+}
+
 async function sendOriginalWithoutReencoding(
   pending: PendingVideo,
   options: {
@@ -1241,15 +1268,11 @@ async function prepareVideoFromUrl(
       userMessage =
         "I couldn’t download that video link. Check it and try again.";
     }
-    if (preparation.statusMessageId != null) {
-      await editMessage(
-        message.chat.id,
-        preparation.statusMessageId,
-        userMessage,
-      ).catch(() => undefined);
-    } else {
-      await sendMessage(message.chat.id, userMessage).catch(() => undefined);
-    }
+    await reportPreparationFailure(
+      message.chat.id,
+      preparation.statusMessageId,
+      userMessage,
+    );
     if (!cancelled) {
       logger.warn(
         { code: error instanceof Error ? error.name : "unknown_error" },
