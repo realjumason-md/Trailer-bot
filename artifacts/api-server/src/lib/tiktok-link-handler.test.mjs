@@ -376,6 +376,13 @@ test("limits user-facing errors to safe messages", () => {
     publicVideoFailureMessage(new TikTokDownloadError("access-denied")),
     /browser or download app.*upload the video/i,
   );
+  assert.match(
+    publicVideoFailureMessage(
+      new TikTokDownloadError("extractor-missing"),
+      "watch.munox.org",
+    ),
+    /browser-only page.*direct public video link.*upload the video/i,
+  );
   assert.doesNotMatch(
     publicVideoFailureMessage(new Error("extractor output with private data")),
     /extractor output with private data/,
